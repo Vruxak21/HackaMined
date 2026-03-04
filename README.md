@@ -116,19 +116,6 @@ This opens a browser UI at [http://localhost:5555](http://localhost:5555). Check
 
 ---
 
-## Google OAuth Setup (for developers)
-
-1. Go to [console.cloud.google.com](https://console.cloud.google.com)
-2. Create a project → **APIs & Services → OAuth consent screen** (External)
-3. **Credentials → Create Credentials → OAuth client ID** (Web application)
-4. Add this redirect URI:
-   ```
-   http://localhost:3000/api/auth/callback/google
-   ```
-5. Copy the **Client ID** and **Client Secret** into your `.env`
-
----
-
 ## Common Issues
 
 | Problem | Fix |
