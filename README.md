@@ -36,7 +36,7 @@ Install these before you begin:
 
 ```bash
 git clone https://github.com/Vruxak21/HackaMined.git
-cd hackamined26
+cd HackaMined
 ```
 
 ### 2. Add the `.env` file
