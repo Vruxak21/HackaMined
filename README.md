@@ -1,36 +1,139 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Hackamined'26
 
-## Getting Started
+A Next.js application with a full authentication system — email/password and Google OAuth — built with [better-auth](https://better-auth.com), [Prisma](https://prisma.io), [Neon PostgreSQL](https://neon.tech), and [shadcn/ui](https://ui.shadcn.com).
 
-First, run the development server:
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Framework | Next.js 16 (App Router) |
+| Language | TypeScript |
+| Styling | Tailwind CSS v4 + shadcn/ui |
+| Auth | better-auth (email/password + Google OAuth) |
+| ORM | Prisma v7 |
+| Database | Neon PostgreSQL (cloud-hosted) |
+| Package manager | Bun |
+
+---
+
+## Requirements
+
+Install these before you begin:
+
+- **Node.js** v20+ — [nodejs.org](https://nodejs.org)
+- **Bun** — [bun.sh](https://bun.sh) or run `npm i -g bun`
+- **Git** — [git-scm.com](https://git-scm.com)
+
+> No local PostgreSQL needed — the database is cloud-hosted on Neon.
+
+---
+
+## Setup & Running Locally
+
+### 1. Clone the repository
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
+git clone https://github.com/YOUR_USERNAME/hackamined26.git
+cd hackamined26
+```
+
+### 2. Add the `.env` file
+
+Create a `.env` file in the project root with the following variables (get values from the project owner):
+
+```env
+DATABASE_URL=postgresql://...
+
+BETTER_AUTH_SECRET=your_secret
+BETTER_AUTH_URL=http://localhost:3000
+
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+```
+
+### 3. Install dependencies
+
+```bash
+bun install
+```
+
+### 4. Generate Prisma client
+
+```bash
+bunx prisma generate
+```
+
+### 5. Start the development server
+
+```bash
 bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Testing the Application
 
-## Learn More
+### Email / Password — Sign Up
 
-To learn more about Next.js, take a look at the following resources:
+1. Open [http://localhost:3000](http://localhost:3000)
+2. Click the **Create Account** tab
+3. Fill in your Name, Email, Password, and Confirm Password
+4. Click **Create Account**
+5. ✅ A green toast should appear: *"Account created! Welcome aboard 🎉"*
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Email / Password — Sign In
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. Click the **Sign In** tab
+2. Enter the email and password you just registered with
+3. Click **Sign In**
+4. ✅ Toast: *"Welcome back! You're now signed in."*
 
-## Deploy on Vercel
+### Google OAuth
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1. Click **Continue with Google** on either tab
+2. Complete the Google sign-in flow
+3. ✅ You'll be redirected back with a success toast
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+---
+
+## Verifying Database Entries
+
+After signing up, inspect the database with Prisma Studio:
+
+```bash
+bunx prisma studio
+```
+
+This opens a browser UI at [http://localhost:5555](http://localhost:5555). Check:
+
+- **`user`** table — name, email, `emailVerified`, timestamps
+- **`session`** table — active session token, expiry, IP address
+- **`account`** table — provider (`credential` or `google`), linked `userId`
+
+---
+
+## Google OAuth Setup (for developers)
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+2. Create a project → **APIs & Services → OAuth consent screen** (External)
+3. **Credentials → Create Credentials → OAuth client ID** (Web application)
+4. Add this redirect URI:
+   ```
+   http://localhost:3000/api/auth/callback/google
+   ```
+5. Copy the **Client ID** and **Client Secret** into your `.env`
+
+---
+
+## Common Issues
+
+| Problem | Fix |
+|---|---|
+| `bun: command not found` | Run `npm i -g bun` |
+| Prisma client errors | Run `bunx prisma generate` |
+| Google OAuth not working | Ensure the redirect URI is added in Google Console |
+| Database connection error | Verify `.env` was copied correctly with no extra spaces |
