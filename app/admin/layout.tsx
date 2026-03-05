@@ -1,44 +1,8 @@
 import { requireAdmin } from "@/lib/auth-helper";
 import { getSession } from "@/lib/auth-helper";
-import { SidebarNav, type NavItem } from "@/components/SidebarNav";
-import Link from "next/link";
-import {
-  Shield,
-  LayoutDashboard,
-  Upload,
-  Files,
-  ClipboardList,
-  Users,
-  LogOut,
-} from "lucide-react";
-
-// ── Nav items ─────────────────────────────────────────────────────────────────
-
-const navItems: NavItem[] = [
-  { href: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/admin/upload", label: "Upload File", icon: Upload },
-  { href: "/admin/files", label: "All Files", icon: Files },
-  { href: "/admin/audit", label: "Audit Log", icon: ClipboardList },
-  { href: "/admin/users", label: "Users", icon: Users },
-];
-
-// ── SignOutButton (client boundary kept minimal) ───────────────────────────────
-// We use a plain <form> POST to Better Auth's sign-out endpoint rather than
-// importing the auth-client here, so this stays a pure Server Component subtree.
-
-function SignOutButton() {
-  return (
-    <form action="/api/auth/sign-out" method="POST">
-      <button
-        type="submit"
-        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-gray-500 transition-colors hover:bg-red-50 hover:text-red-600"
-      >
-        <LogOut size={14} className="shrink-0" />
-        Sign Out
-      </button>
-    </form>
-  );
-}
+import { AdminNav } from "@/components/AdminNav";
+import { SignOutButton } from "@/components/SignOutButton";
+import { Shield } from "lucide-react";
 
 // ── Layout ────────────────────────────────────────────────────────────────────
 
@@ -80,7 +44,7 @@ export default async function AdminLayout({
 
         {/* Navigation */}
         <div className="mt-2 flex-1 overflow-y-auto px-2">
-          <SidebarNav navItems={navItems} />
+          <AdminNav />
         </div>
 
         {/* Bottom user area */}

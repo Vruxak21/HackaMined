@@ -28,7 +28,7 @@ export async function requireAdmin() {
   const session = await getSession();
 
   if (!session?.user?.id) {
-    redirect("/signin");
+    redirect("/");
   }
 
   const user = await prisma.user.findUnique({
@@ -36,7 +36,7 @@ export async function requireAdmin() {
   });
 
   if (!user) {
-    redirect("/signin");
+    redirect("/");
   }
 
   if (user.role !== "ADMIN") {
@@ -54,7 +54,7 @@ export async function requireAuth() {
   const session = await getSession();
 
   if (!session?.user?.id) {
-    redirect("/signin");
+    redirect("/");
   }
 
   const user = await prisma.user.findUnique({
@@ -70,7 +70,7 @@ export async function requireAuth() {
   });
 
   if (!user) {
-    redirect("/signin");
+    redirect("/");
   }
 
   return user;

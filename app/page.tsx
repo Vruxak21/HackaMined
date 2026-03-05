@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -28,7 +29,7 @@ import {
 } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
-import { signIn, signUp } from "@/lib/auth-client";
+import { signIn, signUp, useSession } from "@/lib/auth-client";
 
 // ── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -85,6 +86,7 @@ function PasswordInput({
 // ── Sign In Form ──────────────────────────────────────────────────────────────
 
 function SignInForm() {
+  const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
 
@@ -99,13 +101,15 @@ function SignInForm() {
     const { error } = await signIn.email({
       email: data.email,
       password: data.password,
+      callbackURL: "/auth/callback",
     });
     setLoading(false);
 
     if (error) {
       toast.error(error.message ?? "Sign in failed. Please try again.");
     } else {
-      toast.success("Welcome back! You're now signed in.");
+      toast.success("Welcome back! Redirecting…");
+      router.push("/auth/callback");
     }
   }
 
@@ -113,7 +117,7 @@ function SignInForm() {
     setGoogleLoading(true);
     const { error } = await signIn.social({
       provider: "google",
-      callbackURL: window.location.href,
+      callbackURL: "/auth/callback",
     });
     if (error) {
       setGoogleLoading(false);
@@ -203,6 +207,7 @@ function SignInForm() {
 // ── Sign Up Form ──────────────────────────────────────────────────────────────
 
 function SignUpForm() {
+  const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
 
@@ -218,13 +223,15 @@ function SignUpForm() {
       name: data.name,
       email: data.email,
       password: data.password,
+      callbackURL: "/auth/callback",
     });
     setLoading(false);
 
     if (error) {
       toast.error(error.message ?? "Sign up failed. Please try again.");
     } else {
-      toast.success("Account created! Welcome aboard 🎉");
+      toast.success("Account created! Redirecting…");
+      router.push("/auth/callback");
     }
   }
 
@@ -232,7 +239,7 @@ function SignUpForm() {
     setGoogleLoading(true);
     const { error } = await signIn.social({
       provider: "google",
-      callbackURL: window.location.href,
+      callbackURL: "/auth/callback",
     });
     if (error) {
       setGoogleLoading(false);
@@ -359,6 +366,20 @@ function SignUpForm() {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Home() {
+  const { data: session, isPending } = useSession();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!isPending && session?.user) {
+      router.push("/auth/callback");
+    }
+  }, [session, isPending, router]);
+
+  if (!isPending && session?.user) {
+    // Render nothing while the redirect fires
+    return null;
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-linear-to-br from-background via-muted/30 to-background p-4">
       {/* Decorative blobs */}
