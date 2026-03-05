@@ -1,9 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client"
   output   = "../lib/generated/prisma"
@@ -13,22 +10,45 @@ datasource db {
   provider = "postgresql"
 }
 
-model Test {
-  id        String   @id @default(uuid())
-  name      String
-  createdAt DateTime @default(now())
+// ── Enums ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  USER
 }
 
+enum FileStatus {
+  PROCESSING
+  DONE
+  FAILED
+}
+
+enum Action {
+  LOGIN
+  LOGOUT
+  UPLOAD
+  SCAN
+  DOWNLOAD
+  VIEW
+  DELETE
+}
+
+// ── Better Auth Models (do not modify structure) ─────────────────────────────
+
 model User {
-  id            String    @id
+  id            String     @id
   name          String
   email         String
-  emailVerified Boolean   @default(false)
+  emailVerified Boolean    @default(false)
   image         String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  sessions      Session[]
-  accounts      Account[]
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  role          Role       @default(USER)
+
+  sessions  Session[]
+  accounts  Account[]
+  files     File[]
+  auditLogs AuditLog[]
 
   @@unique([email])
   @@map("user")
@@ -80,4 +100,74 @@ model Verification {
 
   @@index([identifier])
   @@map("verification")
+}
+
+// ── PII Application Models ───────────────────────────────────────────────────
+
+model File {
+  id   String @id @default(cuid())
+
+  /// Original filename as uploaded (e.g. "employee_data.pdf")
+  originalName String
+
+  /// File extension / type: pdf | docx | sql | csv | txt | json | png | jpg
+  fileType String
+
+  /// Base64-encoded raw file bytes (stored in DB — no filesystem)
+  originalContent String? @db.Text
+
+  /// Base64-encoded sanitized file bytes produced by the PII engine
+  sanitizedContent String? @db.Text
+
+  status     FileStatus @default(PROCESSING)
+  maskingMode String     // "redact" | "mask" | "tokenize"
+
+  /// JSON string: {"AADHAAR":2,"EMAIL":3,"PHONE":1}
+  piiSummary String? @db.Text
+
+  totalPiiFound Int @default(0)
+
+  /// JSON string: {"regex":5,"presidio":3,"indic_bert":2}
+  layerBreakdown String? @db.Text
+
+  /// JSON string: {"high":8,"medium":2,"low":0}
+  confidenceBreakdown String? @db.Text
+
+  uploadedBy String
+  uploader   User   @relation(fields: [uploadedBy], references: [id], onDelete: Cascade)
+
+  uploadedAt  DateTime  @default(now())
+  processedAt DateTime?
+
+  auditLogs AuditLog[]
+
+  @@index([uploadedBy])
+  @@index([status])
+  @@map("file")
+}
+
+model AuditLog {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fileId String?
+  file   File?   @relation(fields: [fileId], references: [id], onDelete: SetNull)
+
+  action Action
+
+  /// Human-readable description, e.g. "Admin viewed original content of report.pdf"
+  detail String? @db.Text
+
+  /// Captured from request headers for security auditability
+  ipAddress String?
+
+  timestamp DateTime @default(now())
+
+  @@index([userId])
+  @@index([fileId])
+  @@index([action])
+  @@index([timestamp])
+  @@map("audit_log")
 }
