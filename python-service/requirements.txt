@@ -1,0 +1,15 @@
+presidio-analyzer
+presidio-anonymizer
+spacy
+transformers
+torch
+pymupdf
+python-docx
+pandas
+pytesseract
+Pillow
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+faker
