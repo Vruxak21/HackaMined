@@ -1,0 +1,11 @@
+Meeting Notes — Product & Compliance Sync
+Date: 06 February 2026
+Attendees: Isaac Bakshi (Product), Gagan Sami (Compliance)
+
+Discussion Summary:
+
+Isaac Bakshi raised a concern about the onboarding flow for new customers in Tier-2 cities. The latest batch of signups included a user who registered with mobile number +91 70433 21819 and email liamchaudry@example.net. During KYC verification, the submitted Aadhaar 8001 3389 0838 was flagged by the UIDAI API with a soft mismatch — the address on record listed "655, Konda Road, Mumbai, Maharashtra - 400001" but the submitted address differed in the pincode field. The discrepancy was minor and the case was escalated to the compliance team.
+
+Gagan Sami confirmed that the compliance portal logged the event under reference PAN KLHPY2654E. She mentioned that an automated alert was sent to the registered UPI handle isaac47@ybl. The system also captured the request originating from IP address 252.4.153.239, device MAC 35:44:87:3B:36:4F, and the session was fingerprinted as f8b06eb38b52594ad4140a2fda398df6587d4b3a. Gagan also noted that all such events are stored with a 90-day retention policy as per RBI guidelines.
+
+Action items for next sprint: integrate the UIDAI sandbox for soft-match resolution, update the KYC microservice to store device fingerprints separately from PII fields, and schedule a review with Avi Issac from legal to confirm data retention timelines. Avi can be reached at +91 82704 82814 for a quick pre-sprint call.

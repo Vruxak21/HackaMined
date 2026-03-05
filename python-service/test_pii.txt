@@ -1,0 +1,7 @@
+Customer Record
+Name: Rahul Sharma
+Aadhaar: 5487 8795 5678
+PAN: ABCPS1234D
+Email: rahul@gmail.com
+DOB: 12/05/1997
+Phone: 9876543210

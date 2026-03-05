@@ -1,3 +1,4 @@
+import prisma from "@/lib/db";
 import {
   Table,
   TableBody,
@@ -6,8 +7,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
-// ── MOCK DATA (replace with real Prisma query) ────────────────────────────────
 
 type UserRow = {
   id: string;
@@ -18,21 +17,31 @@ type UserRow = {
   filesUploaded: number;
 };
 
-const mockUsers: UserRow[] = [
-  { id: "u1", name: "Admin User",   email: "admin@piisanitizer.com", role: "ADMIN", joinedAt: new Date("2026-02-01"), filesUploaded: 8 },
-  { id: "u2", name: "Priya Mehta",  email: "user@piisanitizer.com",  role: "USER",  joinedAt: new Date("2026-02-15"), filesUploaded: 0 },
-  { id: "u3", name: "Arjun Verma",  email: "arjun@example.com",      role: "USER",  joinedAt: new Date("2026-03-01"), filesUploaded: 0 },
-];
-
-// ─────────────────────────────────────────────────────────────────────────────
-
 function formatDate(d: Date) {
   return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-export default function AdminUsersPage() {
-  // TODO: replace mockUsers with Prisma query result
-  const users = mockUsers;
+export default async function AdminUsersPage() {
+  const dbUsers = await prisma.user.findMany({
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      role: true,
+      createdAt: true,
+      _count: { select: { files: true } },
+    },
+  });
+
+  const users: UserRow[] = dbUsers.map((u) => ({
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    role: u.role as "ADMIN" | "USER",
+    joinedAt: u.createdAt,
+    filesUploaded: u._count.files,
+  }));
 
   return (
     <div className="flex flex-col gap-6 p-6">

@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
     EyeOff,
@@ -11,6 +12,8 @@ import {
     CheckCircle,
     AlertCircle,
     Shield,
+    WifiOff,
+    AlertTriangle,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -20,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 
 type MaskingMode = "redact" | "mask" | "tokenize";
 type UploadState = "idle" | "uploading" | "processing" | "done" | "error";
+type ServiceStatus = "checking" | "ready" | "no-indic-bert" | "unavailable";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -125,7 +129,7 @@ function ModeCard({
     );
 }
 
-function MockProgressBar({ indeterminate = false }: { indeterminate?: boolean }) {
+function ProgressBar({ indeterminate = false }: { indeterminate?: boolean }) {
     return (
         <div className="h-1.5 w-64 overflow-hidden rounded-full bg-gray-200">
             {indeterminate ? (
@@ -140,6 +144,7 @@ function MockProgressBar({ indeterminate = false }: { indeterminate?: boolean })
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function AdminUploadPage() {
+    const router = useRouter();
     const [mode, setMode] = useState<MaskingMode>("redact");
     const [uploadState, setUploadState] = useState<UploadState>("idle");
     const [isDragging, setIsDragging] = useState(false);
@@ -147,35 +152,89 @@ export default function AdminUploadPage() {
     const [piiCount, setPiiCount] = useState(0);
     const [errorMsg, setErrorMsg] = useState("");
     const [uploadedFileId, setUploadedFileId] = useState<string | null>(null);
+    const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
+    const [uploadWarning, setUploadWarning] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const redirectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // ── Mock upload flow ──────────────────────────────────────────────────────
+    // ── Service health check ──────────────────────────────────────────────────
+    useEffect(() => {
+        let cancelled = false;
+        async function checkHealth() {
+            try {
+                const res = await fetch("/api/health");
+                const data = await res.json();
+                if (cancelled) return;
+                if (!data.available || !data.model_loaded) {
+                    setServiceStatus("unavailable");
+                } else if (data.indic_bert_loaded === false) {
+                    setServiceStatus("no-indic-bert");
+                } else {
+                    setServiceStatus("ready");
+                }
+            } catch {
+                if (!cancelled) setServiceStatus("unavailable");
+            }
+        }
+        checkHealth();
+        return () => { cancelled = true; };
+    }, []);
+
+    // Cleanup poll and redirect timer on unmount
+    useEffect(() => () => {
+        if (pollRef.current) clearInterval(pollRef.current);
+        if (redirectRef.current) clearTimeout(redirectRef.current);
+    }, []);
+
+    // ── Upload flow ───────────────────────────────────────────────────────────
 
     const handleFile = useCallback(
-        (file: File) => {
+        async (file: File) => {
+            if (pollRef.current) clearInterval(pollRef.current);
             setFilename(file.name);
             setUploadState("uploading");
-
-            // TODO: connect to real API — POST /api/files with FormData (file + maskingMode)
-            setTimeout(() => {
+            setErrorMsg("");
+            try {
+                const formData = new FormData();
+                formData.append("file", file);
+                formData.append("mode", mode);
+                const res = await fetch("/api/files", { method: "POST", body: formData });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    setErrorMsg((err as { error?: string }).error ?? "Upload failed.");
+                    setUploadState("error");
+                    return;
+                }
+                const { file: dbFile, warning } = await res.json();
+                if (warning) setUploadWarning(warning);
+                setUploadedFileId(dbFile.id);
                 setUploadState("processing");
-
-                // TODO: poll GET /api/files/[id]/status until status !== PROCESSING
-                setTimeout(() => {
-                    // Mock: 90% chance success, 10% failure
-                    if (Math.random() > 0.1) {
-                        const mockCount = Math.floor(Math.random() * 120) + 10;
-                        setPiiCount(mockCount);
-                        setUploadedFileId("mock-file-id-001"); // TODO: use real file ID from API response
-                        setUploadState("done");
-                    } else {
-                        setErrorMsg("File parsing failed. Please check the file format and try again.");
-                        setUploadState("error");
-                    }
-                }, 2500);
-            }, 1500);
+                pollRef.current = setInterval(async () => {
+                    try {
+                        const statusRes = await fetch(`/api/files/${dbFile.id}/status`);
+                        if (!statusRes.ok) return;
+                        const data = await statusRes.json();
+                        if (data.status === "DONE") {
+                            clearInterval(pollRef.current!);
+                            setPiiCount(data.totalPiiFound ?? 0);
+                            setUploadState("done");
+                            redirectRef.current = setTimeout(() => {
+                                router.push(`/admin/files/${dbFile.id}`);
+                            }, 1500);
+                        } else if (data.status === "FAILED") {
+                            clearInterval(pollRef.current!);
+                            setErrorMsg("Processing failed. Please try again.");
+                            setUploadState("error");
+                        }
+                    } catch { /* keep polling */ }
+                }, 1500);
+            } catch {
+                setErrorMsg("Upload failed. Please check your connection.");
+                setUploadState("error");
+            }
         },
-        []
+        [mode]
     );
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -194,6 +253,8 @@ export default function AdminUploadPage() {
     };
 
     const reset = () => {
+        if (pollRef.current) clearInterval(pollRef.current);
+        if (redirectRef.current) clearTimeout(redirectRef.current);
         setUploadState("idle");
         setFilename("");
         setPiiCount(0);
@@ -212,7 +273,7 @@ export default function AdminUploadPage() {
                     <p className="text-sm font-medium text-gray-700">
                         Uploading <span className="font-semibold text-gray-900">{filename}</span>…
                     </p>
-                    <MockProgressBar />
+                    <ProgressBar />
                 </div>
             );
         }
@@ -225,7 +286,7 @@ export default function AdminUploadPage() {
                         <p className="text-sm font-semibold text-gray-800">Scanning for PII…</p>
                         <p className="mt-0.5 text-xs text-gray-400">This may take a moment</p>
                     </div>
-                    <MockProgressBar indeterminate />
+                    <ProgressBar indeterminate />
                 </div>
             );
         }
@@ -242,6 +303,7 @@ export default function AdminUploadPage() {
                                 {piiCount} PII instance{piiCount !== 1 ? "s" : ""}
                             </span>
                         </p>
+                        <p className="mt-1 text-xs text-gray-400">Redirecting to file details…</p>
                     </div>
                     <div className="flex gap-3">
                         <Button asChild size="sm" className="bg-blue-600 hover:bg-blue-700 text-white">
@@ -329,6 +391,38 @@ export default function AdminUploadPage() {
                         Supported formats: SQL, PDF, DOCX, CSV, TXT, JSON, PNG, JPG
                     </p>
                 </div>
+
+                {/* Service status banners */}
+                {serviceStatus === "checking" && (
+                    <div className="mb-5 flex items-center gap-2.5 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+                        <Loader2 size={15} className="animate-spin shrink-0" />
+                        Checking PII detection service…
+                    </div>
+                )}
+                {serviceStatus === "unavailable" && (
+                    <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                        <WifiOff size={15} className="mt-0.5 shrink-0" />
+                        <span>
+                            <strong>Python service is not running.</strong> Uploads will fail until the service is started.
+                            Run: <code className="rounded bg-red-100 px-1 py-0.5 text-xs">python -m uvicorn main:app --host 0.0.0.0 --port 8000</code> in the <code className="rounded bg-red-100 px-1 py-0.5 text-xs">python-service/</code> directory.
+                        </span>
+                    </div>
+                )}
+                {serviceStatus === "no-indic-bert" && (
+                    <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
+                        <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                        <span>
+                            <strong>indic-bert model not loaded</strong> — running in spaCy-only mode.
+                            Indian PII (Aadhaar, PAN, phone) is still detected via the regex layer. Only transformer-based NER is unavailable.
+                        </span>
+                    </div>
+                )}
+                {uploadWarning && (
+                    <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800">
+                        <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                        {uploadWarning}
+                    </div>
+                )}
 
                 <div className="grid gap-6 lg:grid-cols-3">
                     {/* Left column — mode + drop zone */}

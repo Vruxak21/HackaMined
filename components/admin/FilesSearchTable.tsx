@@ -34,7 +34,7 @@ export type FileRow = {
   status: "PROCESSING" | "DONE" | "FAILED";
   totalPiiFound: number;
   maskingMode: "redact" | "mask" | "tokenize";
-  uploadedAt: Date;
+  uploadedAt: Date | string;
   uploadedBy: string;
 };
 
@@ -68,8 +68,8 @@ const modeStyle: Record<FileRow["maskingMode"], { bg: string; text: string }> = 
   tokenize: { bg: "bg-blue-100",   text: "text-blue-700" },
 };
 
-function formatDate(d: Date) {
-  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+function formatDate(d: Date | string) {
+  return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────

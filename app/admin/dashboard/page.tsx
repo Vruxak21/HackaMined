@@ -26,83 +26,17 @@ import {
     TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import prisma from "@/lib/db";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type FileStatus = "PROCESSING" | "DONE" | "FAILED";
 
-interface MockFile {
-    id: string;
-    originalName: string;
-    fileType: string;
-    status: FileStatus;
-    totalPiiFound: number;
-    uploadedAt: string; // ISO string
-    user: { email: string };
-}
 
-// ── Mock data ─────────────────────────────────────────────────────────────────
-// TODO: replace with real data from Prisma
-
-const STATS = {
-    totalFiles: 24,
-    processed: 18,
-    failed: 2,
-    totalUsers: 5,
-    totalPiiFound: 342,
-};
-
-const RECENT_FILES: MockFile[] = [
-    {
-        id: "clx001",
-        originalName: "employee_records.pdf",
-        fileType: "pdf",
-        status: "DONE",
-        totalPiiFound: 87,
-        uploadedAt: "2026-03-05T10:14:00.000Z",
-        user: { email: "admin@company.in" },
-    },
-    {
-        id: "clx002",
-        originalName: "customer_dump.sql",
-        fileType: "sql",
-        status: "DONE",
-        totalPiiFound: 134,
-        uploadedAt: "2026-03-05T09:02:00.000Z",
-        user: { email: "admin@company.in" },
-    },
-    {
-        id: "clx003",
-        originalName: "onboarding_form.docx",
-        fileType: "docx",
-        status: "PROCESSING",
-        totalPiiFound: 0,
-        uploadedAt: "2026-03-05T13:50:00.000Z",
-        user: { email: "rahul.sharma@company.in" },
-    },
-    {
-        id: "clx004",
-        originalName: "transactions_march.csv",
-        fileType: "csv",
-        status: "FAILED",
-        totalPiiFound: 0,
-        uploadedAt: "2026-03-04T17:30:00.000Z",
-        user: { email: "priya.k@company.in" },
-    },
-    {
-        id: "clx005",
-        originalName: "aadhaar_scan.jpg",
-        fileType: "jpg",
-        status: "DONE",
-        totalPiiFound: 42,
-        uploadedAt: "2026-03-04T11:20:00.000Z",
-        user: { email: "admin@company.in" },
-    },
-];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function formatDate(iso: string) {
+function formatDate(iso: Date | string) {
     return new Date(iso).toLocaleString("en-IN", {
         day: "2-digit",
         month: "short",
@@ -198,7 +132,37 @@ function StatCard({ icon, iconBg, value, label, subtext }: StatCardProps) {
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
-export default function AdminDashboardPage() {
+export default async function AdminDashboardPage() {
+    const [totalFiles, processed, failed, totalUsers, piiAggregate, recentFiles] =
+        await Promise.all([
+            prisma.file.count(),
+            prisma.file.count({ where: { status: "DONE" } }),
+            prisma.file.count({ where: { status: "FAILED" } }),
+            prisma.user.count(),
+            prisma.file.aggregate({ _sum: { totalPiiFound: true } }),
+            prisma.file.findMany({
+                take: 6,
+                orderBy: { uploadedAt: "desc" },
+                select: {
+                    id: true,
+                    originalName: true,
+                    fileType: true,
+                    status: true,
+                    totalPiiFound: true,
+                    uploadedAt: true,
+                    uploader: { select: { email: true } },
+                },
+            }),
+        ]);
+
+    const stats = {
+        totalFiles,
+        processed,
+        failed,
+        totalUsers,
+        totalPiiFound: piiAggregate._sum.totalPiiFound ?? 0,
+    };
+
     return (
         <div className="min-h-full p-6 lg:p-8">
             {/* Page header */}
@@ -215,28 +179,28 @@ export default function AdminDashboardPage() {
                 <StatCard
                     icon={<Files size={20} className="text-blue-600" />}
                     iconBg="bg-blue-100"
-                    value={STATS.totalFiles}
+                    value={stats.totalFiles}
                     label="Total Files"
                     subtext="All uploaded files"
                 />
                 <StatCard
                     icon={<CheckCircle size={20} className="text-green-600" />}
                     iconBg="bg-green-100"
-                    value={STATS.processed}
+                    value={stats.processed}
                     label="Successfully Processed"
                     subtext="PII sanitized"
                 />
                 <StatCard
                     icon={<Users size={20} className="text-purple-600" />}
                     iconBg="bg-purple-100"
-                    value={STATS.totalUsers}
+                    value={stats.totalUsers}
                     label="Registered Users"
                     subtext="Admin + Standard"
                 />
                 <StatCard
                     icon={<ShieldAlert size={20} className="text-red-600" />}
                     iconBg="bg-red-100"
-                    value={STATS.totalPiiFound}
+                    value={stats.totalPiiFound}
                     label="Total PII Detected"
                     subtext="Across all files"
                 />
@@ -284,7 +248,7 @@ export default function AdminDashboardPage() {
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {RECENT_FILES.map((file) => (
+                            {recentFiles.map((file) => (
                                 <TableRow
                                     key={file.id}
                                     className="hover:bg-gray-50/70 transition-colors"
@@ -316,9 +280,9 @@ export default function AdminDashboardPage() {
                                     <TableCell>
                                         <span
                                             className="max-w-[140px] truncate block text-sm text-gray-600"
-                                            title={file.user.email}
+                                            title={file.uploader.email}
                                         >
-                                            {file.user.email}
+                                            {file.uploader.email}
                                         </span>
                                     </TableCell>
 

@@ -1,2 +1,196 @@
-# TODO: implement
-# Main FastAPI application entry point for PII detection service
+"""
+PII Detection Service — FastAPI entry point.
+
+Ties together all parsers and detection modules into two endpoints:
+  POST /process      — sanitise a file (any supported format)
+  POST /detect-text  — detect and mask PII in raw text
+  GET  /health       — liveness probe
+"""
+
+from __future__ import annotations
+
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+# ── Load environment ──────────────────────────────────────────────────────────
+load_dotenv()
+
+# ── Detection modules (singleton instances created on import) ─────────────────
+from detection.analyzer_engine import pii_analyzer          # noqa: E402
+from detection.context_analyzer import context_analyzer     # noqa: E402
+from detection.confidence_scorer import confidence_scorer   # noqa: E402
+from detection.masker import pii_masker                     # noqa: E402
+
+# ── File parsers ──────────────────────────────────────────────────────────────
+from parsers.pdf_parser   import process_pdf    # noqa: E402
+from parsers.docx_parser  import process_docx   # noqa: E402
+from parsers.sql_parser   import process_sql    # noqa: E402
+from parsers.csv_parser   import process_csv    # noqa: E402
+from parsers.txt_parser   import process_txt    # noqa: E402
+from parsers.json_parser  import process_json   # noqa: E402
+from parsers.image_parser import process_image  # noqa: E402
+
+
+# ── Lifespan (replaces deprecated @app.on_event) ─────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _model_loaded
+    # Warm up: forces spaCy model into memory before first real request
+    pii_analyzer.analyze("test warmup text")
+    _model_loaded = True
+    print("PII Detection Service ready")
+    yield
+
+
+# ── App ───────────────────────────────────────────────────────────────────────
+
+app = FastAPI(title="PII Detection Service", lifespan=lifespan)
+
+# Module-level flag set to True once the warmup request completes.
+# The /health endpoint surfaces this so clients can wait for readiness.
+_model_loaded: bool = False
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Pydantic request models ───────────────────────────────────────────────────
+
+class ProcessRequest(BaseModel):
+    file_path: str
+    output_path: str
+    file_type: str
+    mode: str = "redact"
+
+
+class DetectTextRequest(BaseModel):
+    text: str
+    mode: str = "redact"
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _dispatch(req: ProcessRequest) -> dict[str, Any]:
+    """Route to the correct parser based on file_type."""
+    ft = req.file_type.lower().lstrip(".")
+    args = (req.file_path, req.output_path, req.mode)
+
+    if ft == "pdf":
+        return process_pdf(*args)
+    if ft in {"docx", "doc"}:
+        return process_docx(*args)
+    if ft == "sql":
+        return process_sql(*args)
+    if ft == "csv":
+        return process_csv(*args)
+    if ft in {"txt", "md"}:
+        return process_txt(*args)
+    if ft == "json":
+        return process_json(*args)
+    if ft in {"png", "jpg", "jpeg", "tiff", "bmp", "webp"}:
+        return process_image(*args)
+
+    raise ValueError(f"Unsupported file type: {req.file_type!r}")
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health() -> dict:
+    return {
+        "status": "ok",
+        "service": "PII Detection",
+        "model_loaded": _model_loaded,
+        "indic_bert_loaded": pii_analyzer.indic_ner is not None,
+    }
+
+
+@app.post("/process")
+def process_file(req: ProcessRequest) -> dict[str, Any]:
+    """
+    Sanitise a file.
+
+    Creates the output directory if it doesn't already exist, dispatches to
+    the appropriate parser, and returns a PII summary.
+    """
+    try:
+        Path(req.output_path).parent.mkdir(parents=True, exist_ok=True)
+        summary = _dispatch(req)
+        return {
+            "success": True,
+            "pii_summary": summary.get("pii_summary", {}),
+            "total_pii": summary.get("total_pii", 0),
+            "layer_breakdown": summary.get("layer_breakdown", {}),
+            "confidence_breakdown": summary.get("confidence_breakdown", {}),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/detect-text")
+def detect_text(req: DetectTextRequest) -> dict[str, Any]:
+    """
+    Detect and mask PII in a raw text string.
+
+    Runs the full 5-stage pipeline and returns detected spans, the masked
+    text, and summary statistics.
+    """
+    try:
+        analysis = pii_analyzer.analyze(req.text)
+        cleaned = analysis["cleaned_text"]
+
+        enriched = context_analyzer.analyze(
+            cleaned,
+            analysis["presidio_results"],
+            analysis["indic_results"],
+            analysis["label_pairs"],
+        )
+        deduped = confidence_scorer.deduplicate(enriched)
+        scored = confidence_scorer.score_and_filter(deduped)
+        to_mask = scored["to_mask"]
+
+        mask_out = pii_masker.mask(cleaned, to_mask, req.mode)
+
+        detected = [
+            {
+                "type": r["type"],
+                "value": r["value"],
+                "start": r["start"],
+                "end": r["end"],
+                "score": round(r["score"], 4),
+                "source": r.get("source", "presidio_spacy"),
+                "label_boosted": r.get("label_boosted", False),
+                "proximity_boosted": r.get("proximity_boosted", False),
+                "slide6_boosted": r.get("slide6_boosted", False),
+            }
+            for r in to_mask
+        ]
+
+        return {
+            "detected": detected,
+            "masked_text": mask_out["masked_text"],
+            "token_map": mask_out.get("token_map", {}),
+            "pii_summary": confidence_scorer.get_summary(to_mask),
+            "layer_breakdown": confidence_scorer.get_layer_breakdown(to_mask),
+            "confidence_breakdown": confidence_scorer.get_confidence_breakdown(
+                scored["high_count"], scored["medium_count"]
+            ),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+

@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils";
 
 export type AuditRow = {
   id: string;
-  timestamp: Date;
+  timestamp: Date | string;
   userEmail: string;
   action: "LOGIN" | "LOGOUT" | "UPLOAD" | "SCAN" | "DOWNLOAD" | "VIEW" | "DELETE";
   fileName?: string;
@@ -45,10 +45,11 @@ const TABS: { value: FilterTab; label: string }[] = [
   { value: "VIEW",     label: "View" },
 ];
 
-function formatTimestamp(d: Date) {
+function formatTimestamp(d: Date | string) {
+  const dt = new Date(d);
   return {
-    date: d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }),
-    time: d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true }),
+    date: dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }),
+    time: dt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true }),
   };
 }
 

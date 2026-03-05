@@ -1,0 +1,7 @@
+Customer Record
+Name: [REDACTED]
+Aadhaar: [REDACTED]
+PAN: [REDACTED]
+Email: [REDACTED]
+DOB: [REDACTED]
+Phone: [REDACTED]

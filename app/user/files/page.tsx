@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import {
   Search,
   Download,
@@ -16,23 +16,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-// ── MOCK DATA (replace with real API call for authenticated user) ──────────────
+// ─────────────────────────────────────────────────────────────────────────────
 
 type SanitizedFile = {
   id: string;
   originalName: string;
   fileType: string;
   piiRemoved: number;
-  processedAt: Date;
+  processedAt: string;
 };
-
-const mockFiles: SanitizedFile[] = [
-  { id: "f1", originalName: "customers_q1_2026.csv",  fileType: "csv",  piiRemoved: 23, processedAt: new Date("2026-03-01T09:16:00") },
-  { id: "f2", originalName: "employee_records.pdf",   fileType: "pdf",  piiRemoved: 41, processedAt: new Date("2026-03-02T11:31:00") },
-  { id: "f3", originalName: "transactions_feb.sql",   fileType: "sql",  piiRemoved: 7,  processedAt: new Date("2026-03-02T14:11:00") },
-  { id: "f5", originalName: "user_export.json",       fileType: "json", piiRemoved: 12, processedAt: new Date("2026-03-03T16:21:00") },
-  { id: "f7", originalName: "id_scans_batch.png",     fileType: "png",  piiRemoved: 5,  processedAt: new Date("2026-03-04T13:51:00") },
-];
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -55,8 +47,8 @@ function FileTypeIcon({ type }: { type: string }) {
   return <Icon className={cn("size-8", entry.color)} />;
 }
 
-function formatDate(d: Date) {
-  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+function formatDate(d: string) {
+  return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
 // ── Skeleton card ──────────────────────────────────────────────────────────────────
@@ -78,16 +70,44 @@ function SkeletonCard() {
 // ── Page ────────────────────────────────────────────────────────────────────────
 
 export default function UserFilesPage() {
-  // TODO: replace with real data loaded from API (user's sanitized files only)
-  const [loading] = useState(false); // set to true to preview skeleton state
+  const [files, setFiles] = useState<SanitizedFile[]>([]);
+  const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
 
+  useEffect(() => {
+    fetch("/api/files")
+      .then((r) => r.json())
+      .then((data: { files: Array<{
+        id: string; originalName: string; fileType: string;
+        totalPiiFound: number; processedAt: string | null;
+      }> }) => {
+        setFiles(
+          data.files.map((f) => ({
+            id: f.id,
+            originalName: f.originalName,
+            fileType: f.fileType,
+            piiRemoved: f.totalPiiFound,
+            processedAt: f.processedAt ?? "",
+          }))
+        );
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleDownload = useCallback(async (fileId: string, filename: string) => {
+    const res = await fetch(`/api/files/${fileId}/download?type=sanitized`);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  }, []);
+
   const filtered = useMemo(
-    () =>
-      mockFiles.filter((f) =>
-        f.originalName.toLowerCase().includes(query.toLowerCase())
-      ),
-    [query]
+    () => files.filter((f) => f.originalName.toLowerCase().includes(query.toLowerCase())),
+    [files, query]
   );
 
   return (
@@ -95,9 +115,11 @@ export default function UserFilesPage() {
       {/* Header */}
       <div className="flex items-center gap-3">
         <h1 className="text-xl font-bold text-gray-900">My Sanitized Files</h1>
-        <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-semibold text-gray-600">
-          {mockFiles.length}
-        </span>
+        {!loading && (
+          <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-semibold text-gray-600">
+            {files.length}
+          </span>
+        )}
       </div>
 
       {/* Search bar */}
@@ -133,7 +155,7 @@ export default function UserFilesPage() {
         </div>
       )}
 
-      {/* File cards (MOCK: replace with real sanitized file data) */}
+      {/* File cards */}
       {!loading && filtered.length > 0 && (
         <div className="flex flex-col gap-3">
           {filtered.map((file) => (
@@ -160,7 +182,7 @@ export default function UserFilesPage() {
               </div>
 
               {/* Download */}
-              <Button size="sm" variant="outline" className="shrink-0 gap-1.5">
+              <Button size="sm" variant="outline" className="shrink-0 gap-1.5" onClick={() => handleDownload(file.id, file.originalName)}>
                 <Download size={13} />
                 Download
               </Button>

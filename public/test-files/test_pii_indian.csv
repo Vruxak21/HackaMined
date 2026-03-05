@@ -1,0 +1,6 @@
+id,full_name,aadhaar,pan,phone,email,dob,address,upi_id,credit_card
+1,Rahul Sharma,5487 8795 5678,ABCPS1234D,9876543210,rahul.sharma@gmail.com,1990-03-15,"42 MG Road Bangalore Karnataka 560001",rahul.sharma@okicici,4111 1111 1111 1111
+2,Priya Mehta,2345 6789 0123,DGHPM5678K,8765432109,priya.mehta@yahoo.co.in,1985-07-22,"Flat 3B Sunshine Apartments Andheri West Mumbai 400053",priya.mehta@paytm,5500 0000 0000 0004
+3,Arjun Verma,9876 5432 1098,FGHAV9012L,7654321098,arjun.verma@company.in,1995-11-30,"House No 7 Civil Lines New Delhi 110001",arjun@upi,3714 496353 98431
+4,Deepa Krishnan,3456 7890 1234,BCDDK3456M,9988776655,deepa.k@corp.com,1988-05-14,"15 Anna Salai Chennai Tamil Nadu 600002",deepa.k@okhdfcbank,4532 1234 5678 9010
+5,Mohammed Irfan,6789 0123 4567,EFGMI6789N,9876012345,irfan.m@corp.com,1992-09-08,"Plot 22 HITEC City Hyderabad Telangana 500081",irfan.m@okaxis,4916 1234 5678 9012

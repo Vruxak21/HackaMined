@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { use, useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -16,44 +16,33 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-// ── MOCK DATA (replace with real API calls keyed by params.id) ────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────────────
 
-const mockFile = {
-  id: "mock-id",
-  originalName: "demo_customers.csv",
-  fileType: "csv",
-  status: "DONE" as "PROCESSING" | "DONE" | "FAILED",
-  totalPiiFound: 17,
-  maskingMode: "redact" as "redact" | "mask" | "tokenize",
-  uploadedAt: new Date(),
-  processedAt: new Date(),
+type FileDetail = {
+  id: string;
+  originalName: string;
+  fileType: string;
+  status: "PROCESSING" | "DONE" | "FAILED";
+  totalPiiFound: number;
+  maskingMode: "redact" | "mask" | "tokenize";
+  uploadedAt: string;
+  processedAt: string | null;
 };
 
-const mockPiiSummary: Record<string, number> = {
-  PERSON: 3,
-  EMAIL_ADDRESS: 3,
-  IN_PHONE: 3,
-  AADHAAR: 3,
-  PAN: 3,
-  UPI: 2,
+type FileDetailData = {
+  file: FileDetail;
+  originalContent: string;
+  sanitizedContent: string;
+  piiSummary: Record<string, number>;
+  layerBreakdown: { regex: number; presidio_spacy: number; indic_bert: number };
+  confidenceBreakdown: { high_confidence?: number; high?: number; medium_confidence?: number; medium?: number };
 };
-
-// MOCK: detection layer breakdown from detection metadata
-const mockLayerBreakdown = { regex: 8, presidio: 6, indicBert: 3 };
-
-// MOCK: confidence distribution from confidence scoring engine
-const mockConfidenceBreakdown = { high: 12, medium: 5 };
-
-const mockOriginal =
-  "id,name,email,phone,aadhaar\n1,Rahul Sharma,rahul@gmail.com,9876543210,5487 8795 5678";
-
-const mockSanitized =
-  "id,name,email,phone,aadhaar\n1,[REDACTED],[REDACTED],[REDACTED],[REDACTED]";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function formatDate(d: Date) {
-  return d.toLocaleString("en-IN", {
+function formatDate(d: string | null | undefined) {
+  if (!d) return "—";
+  return new Date(d).toLocaleString("en-IN", {
     day: "2-digit",
     month: "short",
     year: "numeric",
@@ -175,18 +164,69 @@ function StatBox({ label, value, colorClass }: { label: string; value: number; c
 export default function AdminFileDetailPage({
   params,
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }) {
-  // TODO: fetch real file by params.id from API
-  const file = mockFile;
-  const piiSummary = mockPiiSummary;
-  const originalContent = mockOriginal;
-  const sanitizedContent = mockSanitized;
+  const { id } = use(params);
+  const [data, setData] = useState<FileDetailData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState("");
 
-  // TODO: replace with router.refresh() or SWR revalidation on real data
-  const handleRefresh = useCallback(() => {}, []);
+  const fetchData = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/files/${id}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setFetchError((err as { error?: string }).error ?? "Failed to load file.");
+        return;
+      }
+      const json = await res.json();
+      setData(json);
+      setFetchError("");
+    } catch {
+      setFetchError("Network error. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
 
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  const handleRefresh = useCallback(() => { fetchData(); }, [fetchData]);
+
+  const handleDownload = useCallback(async (type: "original" | "sanitized") => {
+    const res = await fetch(`/api/files/${id}/download?type=${type}`);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const disposition = res.headers.get("Content-Disposition") ?? "";
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match?.[1] ?? `file-${type}`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  }, [id]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-20 text-gray-400">
+        <Loader2 size={28} className="animate-spin" />
+      </div>
+    );
+  }
+
+  if (fetchError || !data) {
+    return (
+      <div className="flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 m-6 p-4 text-sm text-red-700">
+        <AlertTriangle size={16} />
+        {fetchError || "File not found."}
+      </div>
+    );
+  }
+
+  const { file, piiSummary, originalContent, sanitizedContent, layerBreakdown, confidenceBreakdown } = data;
   const modeStyle = maskingModeStyle[file.maskingMode];
+  const highCount = confidenceBreakdown?.high_confidence ?? confidenceBreakdown?.high ?? 0;
+  const mediumCount = confidenceBreakdown?.medium_confidence ?? confidenceBreakdown?.medium ?? 0;
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -221,11 +261,22 @@ export default function AdminFileDetailPage({
 
         {/* Right: download buttons */}
         <div className="flex shrink-0 items-center gap-2">
-          <Button variant="outline" size="sm" className="gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-2"
+            disabled={file.status !== "DONE"}
+            onClick={() => handleDownload("original")}
+          >
             <Lock size={14} />
             Download Original
           </Button>
-          <Button size="sm" className="gap-2">
+          <Button
+            size="sm"
+            className="gap-2"
+            disabled={file.status !== "DONE"}
+            onClick={() => handleDownload("sanitized")}
+          >
             <Download size={14} />
             Download Sanitized
           </Button>
@@ -257,11 +308,21 @@ export default function AdminFileDetailPage({
               <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-500">
                 Detection Layer Breakdown
               </p>
-              <div className="flex gap-3">
-                {/* MOCK: counts sourced from detection engine metadata */}
-                <StatBox label="Regex Engine"    value={mockLayerBreakdown.regex}      colorClass="border-gray-200 bg-gray-100 text-gray-700" />
-                <StatBox label="Presidio + spaCy" value={mockLayerBreakdown.presidio}  colorClass="border-blue-200 bg-blue-100 text-blue-700" />
-                <StatBox label="indic-bert"        value={mockLayerBreakdown.indicBert} colorClass="border-purple-200 bg-purple-100 text-purple-700" />
+              <div className="flex flex-col gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-gray-600">Regex Engine</span>
+                  <span className="font-semibold text-gray-700">{layerBreakdown?.regex ?? 0} detected</span>
+                </div>
+                <div className="h-px bg-gray-100" />
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-gray-600">Presidio + spaCy</span>
+                  <span className="font-semibold text-blue-700">{layerBreakdown?.presidio_spacy ?? 0} detected</span>
+                </div>
+                <div className="h-px bg-gray-100" />
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-gray-600">indic-bert</span>
+                  <span className="font-semibold text-purple-700">{layerBreakdown?.indic_bert ?? 0} detected</span>
+                </div>
               </div>
             </div>
 
@@ -271,9 +332,8 @@ export default function AdminFileDetailPage({
                 Confidence Breakdown
               </p>
               <div className="flex gap-3">
-                {/* MOCK: sourced from confidence scoring engine (tiered thresholds) */}
-                <StatBox label="High Confidence (85%+)"      value={mockConfidenceBreakdown.high}   colorClass="border-green-200 bg-green-100 text-green-700" />
-                <StatBox label="Medium Confidence (60–84%)"  value={mockConfidenceBreakdown.medium} colorClass="border-yellow-200 bg-yellow-100 text-yellow-700" />
+                <StatBox label="High Confidence (85%+)"     value={highCount}   colorClass="border-green-200 bg-green-100 text-green-700" />
+                <StatBox label="Medium Confidence (60–84%)" value={mediumCount} colorClass="border-yellow-200 bg-yellow-100 text-yellow-700" />
               </div>
             </div>
 
@@ -283,7 +343,6 @@ export default function AdminFileDetailPage({
                 PII Types Found
               </p>
               <div className="flex flex-wrap gap-2">
-                {/* MOCK: piiSummary keyed by entity type from detection engine */}
                 {Object.entries(piiSummary).map(([type, count]) => {
                   const { bg, text } = piiTypeStyle(type);
                   return (
@@ -303,7 +362,6 @@ export default function AdminFileDetailPage({
 
       {/* ── 4. Side-by-Side Viewer ────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* MOCK: originalContent decoded from base64 DB column */}
         <CodePanel
           variant="original"
           title={
@@ -314,7 +372,6 @@ export default function AdminFileDetailPage({
           }
           content={originalContent}
         />
-        {/* MOCK: sanitizedContent from sanitized DB column */}
         <CodePanel
           variant="sanitized"
           title={

@@ -1,6 +1,53 @@
-// TODO: implement
 import { NextResponse } from "next/server";
+import { requireAuth } from "@/lib/auth-helper";
+import prisma from "@/lib/db";
 
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
-    return NextResponse.json({ message: "TODO: get file status", id: params.id });
+function isRedirectError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    typeof (err as { digest?: string }).digest === "string" &&
+    (err as { digest: string }).digest.startsWith("NEXT_REDIRECT")
+  );
+}
+
+// ── GET /api/files/[id]/status — poll every 1500 ms ──────────────────────
+
+export async function GET(
+  _req: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    await requireAuth();
+  } catch (err) {
+    if (isRedirectError(err)) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    throw err;
+  }
+
+  const { id } = await params;
+
+  const file = await prisma.file.findUnique({
+    where: { id },
+    select: {
+      status: true,
+      totalPiiFound: true,
+      piiSummary: true,
+      layerBreakdown: true,
+      processedAt: true,
+    },
+  });
+
+  if (!file) {
+    return NextResponse.json({ error: "File not found" }, { status: 404 });
+  }
+
+  return NextResponse.json({
+    status: file.status,
+    totalPiiFound: file.totalPiiFound,
+    piiSummary: file.piiSummary ? JSON.parse(file.piiSummary) : {},
+    layerBreakdown: file.layerBreakdown ? JSON.parse(file.layerBreakdown) : {},
+    processedAt: file.processedAt,
+  });
 }
