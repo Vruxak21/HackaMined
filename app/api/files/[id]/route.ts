@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireAuth, logAction } from "@/lib/auth-helper";
 import prisma from "@/lib/db";
+import { getFile } from "@/lib/db-encrypted";
 
 const TEXT_TYPES = new Set(["sql", "csv", "txt", "json", "md"]);
 
@@ -42,7 +43,7 @@ export async function GET(
 
   const { id } = await params;
 
-  const file = await prisma.file.findUnique({ where: { id } });
+  const file = await getFile(id);
   if (!file) {
     return NextResponse.json({ error: "File not found" }, { status: 404 });
   }
@@ -50,8 +51,14 @@ export async function GET(
   await logAction({ userId: user.id, action: "VIEW", fileId: id });
 
   if (user.role === "ADMIN") {
-    const originalContent = decodeContent(file.originalContent, file.fileType);
-    const sanitizedContent = decodeContent(file.sanitizedContent, file.fileType);
+    const originalContent = decodeContent(
+      file.originalContent as string | null,
+      file.fileType as string,
+    );
+    const sanitizedContent = decodeContent(
+      file.sanitizedContent as string | null,
+      file.fileType as string,
+    );
 
     return NextResponse.json({
       file: {
@@ -67,11 +74,9 @@ export async function GET(
       },
       originalContent,
       sanitizedContent,
-      piiSummary: file.piiSummary ? JSON.parse(file.piiSummary) : {},
-      layerBreakdown: file.layerBreakdown ? JSON.parse(file.layerBreakdown) : {},
-      confidenceBreakdown: file.confidenceBreakdown
-        ? JSON.parse(file.confidenceBreakdown)
-        : {},
+      piiSummary: file.piiSummary,
+      layerBreakdown: file.layerBreakdown,
+      confidenceBreakdown: file.confidenceBreakdown,
     });
   }
 

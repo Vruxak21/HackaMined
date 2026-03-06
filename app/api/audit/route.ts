@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth-helper";
-import prisma from "@/lib/db";
+import { getAuditLogs } from "@/lib/db-encrypted";
 
 function isRedirectError(err: unknown): boolean {
   return (
@@ -25,22 +25,12 @@ export async function GET(req: NextRequest) {
     const { searchParams } = req.nextUrl;
     const page = Math.max(1, Number(searchParams.get("page") ?? 1));
     const limit = Math.max(1, Math.min(200, Number(searchParams.get("limit") ?? 50)));
-    const skip = (page - 1) * limit;
 
-    const [logs, total] = await prisma.$transaction([
-      prisma.auditLog.findMany({
-        orderBy: { timestamp: "desc" },
-        skip,
-        take: limit,
-        include: {
-          user: { select: { email: true, name: true } },
-          file: { select: { originalName: true } },
-        },
-      }),
-      prisma.auditLog.count(),
-    ]);
+    const { logs, total } = await getAuditLogs({ page, limit });
 
-    return NextResponse.json({ logs, total, page, limit });
+    const safeLog = logs.map(({ encryptionKeyVersion: _, ...l }: Record<string, unknown>) => l);
+
+    return NextResponse.json({ logs: safeLog, total, page, limit });
   } catch (err) {
     console.error("[GET /api/audit]", err);
     return NextResponse.json(

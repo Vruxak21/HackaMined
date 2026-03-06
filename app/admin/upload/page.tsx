@@ -14,6 +14,7 @@ import {
     Shield,
     WifiOff,
     AlertTriangle,
+    Info,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -409,11 +410,11 @@ export default function AdminUploadPage() {
                     </div>
                 )}
                 {serviceStatus === "no-indic-bert" && (
-                    <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
-                        <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                    <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+                        <Info size={15} className="mt-0.5 shrink-0" />
                         <span>
-                            <strong>indic-bert model not loaded</strong> — running in spaCy-only mode.
-                            Indian PII (Aadhaar, PAN, phone) is still detected via the regex layer. Only transformer-based NER is unavailable.
+                            Running in <strong>spaCy + regex mode</strong> — transformer NER (indic-bert) is not loaded.
+                            All PII types including Aadhaar, PAN, and phone numbers are still detected normally.
                         </span>
                     </div>
                 )}

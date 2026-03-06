@@ -5,6 +5,9 @@ import { join } from "path";
 import { requireAdmin, requireAuth, logAction } from "@/lib/auth-helper";
 import prisma from "@/lib/db";
 import { enqueueJob } from "@/lib/job-queue";
+import { signBody } from "@/lib/hmac";
+import { callPythonService } from "@/lib/service-auth";
+import { createFile, updateFileAfterProcessing, getFileList } from "@/lib/db-encrypted";
 
 const ALLOWED_EXTENSIONS = new Set([
   "pdf", "docx", "doc", "sql", "csv", "txt", "json", "png", "jpg", "jpeg",
@@ -38,33 +41,20 @@ async function processFileInBackground(
     // Step 1: Write decoded bytes to a temp file
     await writeFile(tmpPath, Buffer.from(base64, "base64"));
 
-    // Step 2: Call the Python service (120 s timeout)
-    const pythonUrl =
-      process.env.PYTHON_SERVICE_URL ?? "http://localhost:8000";
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120_000);
-
+    // Step 2: Call the Python service (120 s timeout, HMAC-signed)
     let res: Response;
     try {
-      res = await fetch(`${pythonUrl}/process`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          file_path: tmpPath,
-          output_path: outPath,
-          file_type: ext,
-          mode,
-        }),
-        signal: controller.signal,
+      res = await callPythonService("/process", {
+        file_path: tmpPath,
+        output_path: outPath,
+        file_type: ext,
+        mode,
       });
     } catch (fetchErr) {
-      if (fetchErr instanceof Error && fetchErr.name === "AbortError") {
+      if (fetchErr instanceof Error && fetchErr.message === "Python service timeout") {
         throw new Error("Processing timeout — file may be too large");
       }
       throw fetchErr;
-    } finally {
-      clearTimeout(timeoutId);
     }
 
     if (!res.ok) {
@@ -83,20 +73,16 @@ async function processFileInBackground(
       throw new Error("Python service reported a processing failure");
     }
 
-    // Step 3: Read sanitized output and persist
+    // Step 3: Read sanitized output and persist (encrypted via db-encrypted)
     const sanitizedBase64 = (await readFile(outPath)).toString("base64");
 
-    await prisma.file.update({
-      where: { id: fileId },
-      data: {
-        status: "DONE",
-        sanitizedContent: sanitizedBase64,
-        piiSummary: JSON.stringify(result.pii_summary ?? {}),
-        totalPiiFound: result.total_pii ?? 0,
-        layerBreakdown: JSON.stringify(result.layer_breakdown ?? {}),
-        confidenceBreakdown: JSON.stringify(result.confidence_breakdown ?? {}),
-        processedAt: new Date(),
-      },
+    await updateFileAfterProcessing(fileId, {
+      sanitizedContent: sanitizedBase64,
+      piiSummary: result.pii_summary ?? {},
+      totalPiiFound: result.total_pii ?? 0,
+      layerBreakdown: result.layer_breakdown ?? {},
+      confidenceBreakdown: result.confidence_breakdown ?? {},
+      processedAt: new Date(),
     });
 
     await logAction({
@@ -181,16 +167,13 @@ export async function POST(req: NextRequest) {
   const bytes = await file.arrayBuffer();
   const base64 = Buffer.from(bytes).toString("base64");
 
-  // 5. Create the File record in PROCESSING state
-  const dbFile = await prisma.file.create({
-    data: {
-      originalName: file.name,
-      fileType: ext,
-      status: "PROCESSING",
-      originalContent: base64,
-      maskingMode: mode,
-      uploadedBy: user.id,
-    },
+  // 5. Create the File record in PROCESSING state (originalContent encrypted via db-encrypted)
+  const dbFile = await createFile({
+    originalName: file.name,
+    fileType: ext,
+    originalContent: base64,
+    maskingMode: mode,
+    uploadedBy: user.id,
   });
 
   // 6. Log UPLOAD action
@@ -216,8 +199,9 @@ export async function POST(req: NextRequest) {
       ? `File is ${(file.size / 1024 / 1024).toFixed(1)} MB. Processing may be slow for large files.`
       : undefined;
 
-  // 8. Return immediately with the created record
-  return NextResponse.json({ file: dbFile, ...(warning ? { warning } : {}) }, { status: 201 });
+  // 8. Return immediately with the created record (strip content blobs and key metadata)
+  const { originalContent: _oc, sanitizedContent: _sc, encryptionKeyVersion: _kv, ...safeFile } = dbFile as Record<string, unknown>;
+  return NextResponse.json({ file: safeFile, ...(warning ? { warning } : {}) }, { status: 201 });
 }
 
 // ── GET /api/files — File List ─────────────────────────────────────────────
@@ -234,53 +218,22 @@ export async function GET() {
   }
 
   if (user.role === "ADMIN") {
-    const files = await prisma.file.findMany({
-      orderBy: { uploadedAt: "desc" },
-      select: {
-        id: true,
-        originalName: true,
-        fileType: true,
-        status: true,
-        maskingMode: true,
-        piiSummary: true,
-        totalPiiFound: true,
-        layerBreakdown: true,
-        confidenceBreakdown: true,
-        uploadedBy: true,
-        uploadedAt: true,
-        processedAt: true,
-        uploader: {
-          select: { id: true, name: true, email: true, role: true },
-        },
-      },
-    });
-
-    const parsed = files.map((f) => ({
-      ...f,
-      piiSummary: f.piiSummary ? JSON.parse(f.piiSummary) : null,
-      layerBreakdown: f.layerBreakdown ? JSON.parse(f.layerBreakdown) : null,
-      confidenceBreakdown: f.confidenceBreakdown
-        ? JSON.parse(f.confidenceBreakdown)
-        : null,
-    }));
-
+    const files = await getFileList();
+    const parsed = files.map(({ encryptionKeyVersion: _, ...f }) => f);
     return NextResponse.json({ files: parsed });
   }
 
   // USER: only DONE files, minimal safe fields (no content, no uploader info)
-  const files = await prisma.file.findMany({
-    where: { status: "DONE" },
-    orderBy: { uploadedAt: "desc" },
-    select: {
-      id: true,
-      originalName: true,
-      fileType: true,
-      status: true,
-      totalPiiFound: true,
-      uploadedAt: true,
-      processedAt: true,
-    },
-  });
+  const files = await getFileList({ status: "DONE" });
+  const safeFiles = files.map((f) => ({
+    id: f.id,
+    originalName: f.originalName,
+    fileType: f.fileType,
+    status: f.status,
+    totalPiiFound: f.totalPiiFound,
+    uploadedAt: f.uploadedAt,
+    processedAt: f.processedAt,
+  }));
 
-  return NextResponse.json({ files });
+  return NextResponse.json({ files: safeFiles });
 }

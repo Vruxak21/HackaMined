@@ -2,7 +2,7 @@ import { requireAdmin } from "@/lib/auth-helper";
 import { getSession } from "@/lib/auth-helper";
 import { AdminNav } from "@/components/AdminNav";
 import { SignOutButton } from "@/components/SignOutButton";
-import { Shield } from "lucide-react";
+import { Shield, ShieldCheck } from "lucide-react";
 
 // ── Layout ────────────────────────────────────────────────────────────────────
 
@@ -45,6 +45,14 @@ export default async function AdminLayout({
         {/* Navigation */}
         <div className="mt-2 flex-1 overflow-y-auto px-2">
           <AdminNav />
+        </div>
+
+        {/* Security badge */}
+        <div className="mx-2 mb-2">
+          <div className="flex items-center gap-1.5 rounded-md bg-green-50 px-2.5 py-1.5">
+            <ShieldCheck size={12} className="shrink-0 text-green-600" />
+            <span className="text-[11px] font-medium text-green-700">AES-256-GCM Encrypted</span>
+          </div>
         </div>
 
         {/* Bottom user area */}

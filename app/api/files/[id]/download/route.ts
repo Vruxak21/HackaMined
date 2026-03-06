@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, logAction } from "@/lib/auth-helper";
-import prisma from "@/lib/db";
+import { getFile, getFileForDownload } from "@/lib/db-encrypted";
 
 const MIME_TYPES: Record<string, string> = {
   pdf:  "application/pdf",
@@ -44,7 +44,7 @@ export async function GET(
   const { id } = await params;
   const type = req.nextUrl.searchParams.get("type") ?? "sanitized";
 
-  const file = await prisma.file.findUnique({ where: { id } });
+  const file = await getFile(id);
   if (!file) {
     return NextResponse.json({ error: "File not found" }, { status: 404 });
   }
@@ -58,16 +58,13 @@ export async function GET(
     return NextResponse.json({ error: "Access denied" }, { status: 403 });
   }
 
-  const base64Content =
-    type === "original" ? file.originalContent : file.sanitizedContent;
-
-  if (!base64Content) {
+  const buffer = await getFileForDownload(id, type as "original" | "sanitized");
+  if (!buffer) {
     return NextResponse.json({ error: "Content not available" }, { status: 404 });
   }
 
-  const buffer = Buffer.from(base64Content, "base64");
-  const ext = file.fileType;
-  const baseName = file.originalName.replace(/\.[^.]+$/, "");
+  const ext = file.fileType as string;
+  const baseName = (file.originalName as string).replace(/\.[^.]+$/, "");
   const suffix = type === "original" ? "original" : "sanitized";
   const downloadName = `${baseName}_${suffix}.${ext}`;
   const mimeType = MIME_TYPES[ext] ?? "application/octet-stream";

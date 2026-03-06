@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { auth } from "./auth";
 import prisma from "./db";
+import { createAuditLog } from "./db-encrypted";
 import type { Action } from "./generated/prisma/client";
 
 // ── getSession ─────────────────────────────────────────────────────────────
@@ -87,18 +88,5 @@ export async function logAction(params: {
   detail?: string;
   ipAddress?: string;
 }): Promise<void> {
-  try {
-    await prisma.auditLog.create({
-      data: {
-        userId: params.userId,
-        action: params.action,
-        fileId: params.fileId ?? null,
-        detail: params.detail ?? null,
-        ipAddress: params.ipAddress ?? null,
-      },
-    });
-  } catch (err) {
-    // Intentionally silenced — audit log failure must never surface to users
-    console.error("[logAction] Failed to write audit log:", err);
-  }
+  await createAuditLog(params);
 }

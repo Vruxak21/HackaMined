@@ -139,6 +139,10 @@ model File {
   uploadedAt  DateTime  @default(now())
   processedAt DateTime?
 
+  /// Tracks which ENCRYPTION_KEY version was used to encrypt content fields.
+  /// Increment ENCRYPTION_KEY_VERSION in .env when rotating keys.
+  encryptionKeyVersion Int @default(1)
+
   auditLogs AuditLog[]
 
   @@index([uploadedBy])
@@ -162,6 +166,9 @@ model AuditLog {
 
   /// Captured from request headers for security auditability
   ipAddress String?
+
+  /// Tracks which ENCRYPTION_KEY version was used to encrypt detail/ipAddress.
+  encryptionKeyVersion Int @default(1)
 
   timestamp DateTime @default(now())
 

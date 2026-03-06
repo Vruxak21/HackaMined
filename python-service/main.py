@@ -5,6 +5,13 @@ Ties together all parsers and detection modules into two endpoints:
   POST /process      — sanitise a file (any supported format)
   POST /detect-text  — detect and mask PII in raw text
   GET  /health       — liveness probe
+
+Security:
+  POST endpoints are protected with HMAC-SHA256 request signing.
+  Next.js signs every request with x-service-signature and x-service-timestamp.
+  Signatures are computed over "<timestamp_ms>.<body>" using INTERNAL_SERVICE_SECRET.
+  Requests without a valid, fresh signature are rejected with HTTP 401.
+  Set INTERNAL_SERVICE_SECRET (64-hex value) in python-service/.env.
 """
 
 from __future__ import annotations
@@ -15,8 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from middleware.auth_middleware import verify_service_signature
 from pydantic import BaseModel
 
 # ── Load environment ──────────────────────────────────────────────────────────
@@ -57,6 +65,7 @@ app = FastAPI(title="PII Detection Service", lifespan=lifespan)
 # Module-level flag set to True once the warmup request completes.
 # The /health endpoint surfaces this so clients can wait for readiness.
 _model_loaded: bool = False
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -118,7 +127,7 @@ def health() -> dict:
     }
 
 
-@app.post("/process")
+@app.post("/process", dependencies=[Depends(verify_service_signature)])
 def process_file(req: ProcessRequest) -> dict[str, Any]:
     """
     Sanitise a file.
@@ -142,7 +151,7 @@ def process_file(req: ProcessRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/detect-text")
+@app.post("/detect-text", dependencies=[Depends(verify_service_signature)])
 def detect_text(req: DetectTextRequest) -> dict[str, Any]:
     """
     Detect and mask PII in a raw text string.

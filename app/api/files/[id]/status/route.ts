@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth-helper";
 import prisma from "@/lib/db";
+import { decryptJSON } from "@/lib/encryption";
 
 function isRedirectError(err: unknown): boolean {
   return (
@@ -46,8 +47,8 @@ export async function GET(
   return NextResponse.json({
     status: file.status,
     totalPiiFound: file.totalPiiFound,
-    piiSummary: file.piiSummary ? JSON.parse(file.piiSummary) : {},
-    layerBreakdown: file.layerBreakdown ? JSON.parse(file.layerBreakdown) : {},
+    piiSummary: decryptJSON(file.piiSummary),
+    layerBreakdown: decryptJSON(file.layerBreakdown),
     processedAt: file.processedAt,
   });
 }

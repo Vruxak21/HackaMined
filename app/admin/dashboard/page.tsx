@@ -4,6 +4,10 @@ import {
     CheckCircle,
     Users,
     ShieldAlert,
+    ShieldCheck,
+    ShieldOff,
+    Lock,
+    XCircle,
     FileText,
     FileSpreadsheet,
     FileJson,
@@ -27,6 +31,10 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import prisma from "@/lib/db";
+import { headers } from "next/headers";
+import { getEncryptionStatus } from "@/lib/get-encryption-status";
+import type { EncryptionStatus } from "@/lib/get-encryption-status";
+import { SecurityStatusCard } from "@/components/SecurityStatusCard";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -133,7 +141,7 @@ function StatCard({ icon, iconBg, value, label, subtext }: StatCardProps) {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default async function AdminDashboardPage() {
-    const [totalFiles, processed, failed, totalUsers, piiAggregate, recentFiles] =
+    const [totalFiles, processed, failed, totalUsers, piiAggregate, recentFiles, encRes] =
         await Promise.all([
             prisma.file.count(),
             prisma.file.count({ where: { status: "DONE" } }),
@@ -153,6 +161,15 @@ export default async function AdminDashboardPage() {
                     uploader: { select: { email: true } },
                 },
             }),
+            (async () => {
+                try {
+                    const h = await headers();
+                    const proto = h.get("x-forwarded-proto") ?? (h.get("host")?.includes("localhost") ? "https" : "http");
+                    return await getEncryptionStatus(proto);
+                } catch {
+                    return null;
+                }
+            })(),
         ]);
 
     const stats = {
@@ -204,6 +221,11 @@ export default async function AdminDashboardPage() {
                     label="Total PII Detected"
                     subtext="Across all files"
                 />
+            </div>
+
+            {/* Security status */}
+            <div className="mb-8">
+                <SecurityStatusCard initial={encRes} />
             </div>
 
             {/* Recent uploads table */}
@@ -258,7 +280,7 @@ export default async function AdminDashboardPage() {
                                         <div className="flex items-center gap-2">
                                             <FileTypeIcon type={file.fileType} />
                                             <span
-                                                className="max-w-[160px] truncate text-sm font-medium text-gray-800"
+                                                className="max-w-40 truncate text-sm font-medium text-gray-800"
                                                 title={file.originalName}
                                             >
                                                 {file.originalName}
@@ -279,7 +301,7 @@ export default async function AdminDashboardPage() {
                                     {/* Uploaded by */}
                                     <TableCell>
                                         <span
-                                            className="max-w-[140px] truncate block text-sm text-gray-600"
+                                            className="max-w-35 truncate block text-sm text-gray-600"
                                             title={file.uploader.email}
                                         >
                                             {file.uploader.email}

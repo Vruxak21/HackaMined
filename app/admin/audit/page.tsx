@@ -1,4 +1,5 @@
 import prisma from "@/lib/db";
+import { decrypt } from "@/lib/encryption";
 import { AuditFilterTable, type AuditRow } from "@/components/admin/AuditFilterTable";
 
 export default async function AdminAuditPage() {
@@ -25,8 +26,8 @@ export default async function AdminAuditPage() {
     userEmail: l.user.email,
     action: l.action as AuditRow["action"],
     fileName: l.file?.originalName,
-    detail: l.detail ?? undefined,
-    ipAddress: l.ipAddress ?? undefined,
+    detail: decrypt(l.detail) ?? undefined,
+    ipAddress: decrypt(l.ipAddress) ?? undefined,
   }));
 
   return (
