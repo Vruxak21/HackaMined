@@ -8,13 +8,17 @@ import { enqueueJob } from "@/lib/job-queue";
 import { signBody } from "@/lib/hmac";
 import { callPythonService } from "@/lib/service-auth";
 import { createFile, updateFileAfterProcessing, getFileList } from "@/lib/db-encrypted";
+import {
+  MAX_FILE_SIZE_BYTES,
+  MAX_FILE_SIZE_LABEL,
+  LARGE_FILE_THRESHOLD_BYTES,
+  POLL_INTERVAL_MS,
+  MAX_POLL_ATTEMPTS,
+} from "@/lib/constants";
 
 const ALLOWED_EXTENSIONS = new Set([
   "pdf", "docx", "doc", "sql", "csv", "txt", "json", "png", "jpg", "jpeg",
 ]);
-
-const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
-const LARGE_FILE_THRESHOLD = 5 * 1024 * 1024;  // 5 MB → chunked path in Python
 
 // Helper: detect Next.js redirect errors thrown by requireAdmin/requireAuth
 function isRedirectError(err: unknown): boolean {
@@ -42,53 +46,80 @@ async function processFileInBackground(
     // Step 1: Write decoded bytes to a temp file
     await writeFile(tmpPath, Buffer.from(base64, "base64"));
 
-    // Step 2: Call the Python service (HMAC-signed)
-    // Large files use the chunked parallel path (up to 10 min); small files 2 min.
-    const fileSizeApprox = Math.floor(base64.length * 3 / 4);
-    const timeoutMs = fileSizeApprox > LARGE_FILE_THRESHOLD ? 600_000 : 120_000;
+    // Step 2: Start Python processing — returns immediately with {started: true}.
+    // Python runs the job in a background thread and exposes progress via
+    // GET /process-status/{id}, so we never hold an HTTP connection open for
+    // the full processing duration (avoids the 600-second timeout issue).
+    const startRes = await callPythonService("/process", {
+      file_path: tmpPath,
+      output_path: outPath,
+      file_type: ext,
+      mode,
+      job_id: fileId,
+    }, 30_000);  // 30 s just to start the job
 
-    let res: Response;
-    try {
-      res = await callPythonService("/process", {
-        file_path: tmpPath,
-        output_path: outPath,
-        file_type: ext,
-        mode,
-      }, timeoutMs);
-    } catch (fetchErr) {
-      if (fetchErr instanceof Error && fetchErr.message === "Python service timeout") {
-        throw new Error("Processing timeout — file may be too large");
-      }
-      throw fetchErr;
+    if (!startRes.ok) {
+      const errText = await startRes.text().catch(() => "");
+      throw new Error(`Python service returned HTTP ${startRes.status}: ${errText}`);
+    }
+    const started = await startRes.json() as { started: boolean };
+    if (!started.started) {
+      throw new Error("Python service failed to start processing");
     }
 
-    if (!res.ok) {
-      throw new Error(`Python service returned HTTP ${res.status}`);
-    }
+    // Step 3: Poll /process-status until the job reports finished=true.
+    const baseUrl = process.env.PYTHON_SERVICE_URL ?? "http://localhost:8000";
+    const MAX_WAIT_MS   = MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS; // ~10 min
+    const startTime     = Date.now();
 
-    const result: {
-      success: boolean;
+    type StatusResponse = {
+      finished: boolean;
+      success?: boolean;
+      error?: string;
       pii_summary?: Record<string, number>;
       total_pii?: number;
       layer_breakdown?: Record<string, number>;
       confidence_breakdown?: Record<string, number>;
       processing_info?: Record<string, unknown>;
-    } = await res.json();
+    };
 
-    if (!result.success) {
-      throw new Error("Python service reported a processing failure");
+    let finalStatus: StatusResponse | null = null;
+
+    while (Date.now() - startTime < MAX_WAIT_MS) {
+      await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
+      try {
+        const pollRes = await fetch(
+          `${baseUrl}/process-status/${encodeURIComponent(fileId)}`,
+          { signal: AbortSignal.timeout(10_000) },
+        );
+        if (!pollRes.ok) continue;
+        const status = await pollRes.json() as StatusResponse;
+        if (status.finished) {
+          finalStatus = status;
+          break;
+        }
+      } catch {
+        // Transient error — keep polling
+      }
     }
 
-    // Step 3: Read sanitized output and persist (encrypted via db-encrypted)
+    if (!finalStatus) {
+      throw new Error("Processing timed out");
+    }
+    if (!finalStatus.success) {
+      throw new Error(finalStatus.error ?? "Processing failed");
+    }
+
+    // Step 4: Read the sanitized output file Python wrote, persist encrypted
     const sanitizedBase64 = (await readFile(outPath)).toString("base64");
 
     await updateFileAfterProcessing(fileId, {
       sanitizedContent: sanitizedBase64,
-      piiSummary: result.pii_summary ?? {},
-      totalPiiFound: result.total_pii ?? 0,
-      layerBreakdown: result.layer_breakdown ?? {},
-      confidenceBreakdown: result.confidence_breakdown ?? {},
-      processingInfo: result.processing_info,
+      piiSummary: finalStatus.pii_summary ?? {},
+      totalPiiFound: finalStatus.total_pii ?? 0,
+      layerBreakdown: finalStatus.layer_breakdown ?? {},
+      confidenceBreakdown: finalStatus.confidence_breakdown ?? {},
+      processingInfo: finalStatus.processing_info,
       processedAt: new Date(),
     });
 
@@ -96,7 +127,7 @@ async function processFileInBackground(
       userId,
       action: "SCAN",
       fileId,
-      detail: `Found ${result.total_pii ?? 0} PII instances`,
+      detail: `Found ${finalStatus.total_pii ?? 0} PII instances`,
     });
   } catch (err) {
     // Mark as failed and log the error detail
@@ -163,10 +194,10 @@ export async function POST(req: NextRequest) {
   }
 
   // 3b. Validate size
-  if (file.size > MAX_FILE_SIZE) {
+  if (file.size > MAX_FILE_SIZE_BYTES) {
     return NextResponse.json(
-      { error: "File size exceeds the 100 MB limit" },
-      { status: 400 },
+      { error: `File too large. Maximum size is ${MAX_FILE_SIZE_LABEL}.` },
+      { status: 413 },
     );
   }
 
@@ -200,9 +231,8 @@ export async function POST(req: NextRequest) {
   // 7. Enqueue background processing (job queue keeps the event loop alive)
   enqueueJob(() => processFileInBackground(dbFile.id, base64, ext, mode, user.id));
 
-  const WARN_SIZE = 5 * 1024 * 1024; // 5 MB
   const warning =
-    file.size > WARN_SIZE
+    file.size > LARGE_FILE_THRESHOLD_BYTES
       ? `File is ${(file.size / 1024 / 1024).toFixed(1)} MB. Processing may be slow for large files.`
       : undefined;
 

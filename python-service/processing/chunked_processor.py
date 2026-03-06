@@ -34,7 +34,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from detection.analyzer_engine import pii_analyzer
 from detection.context_analyzer import context_analyzer
@@ -45,18 +45,20 @@ from detection.masker import pii_masker
 
 LARGE_FILE_THRESHOLD     = 5 * 1024 * 1024   # 5 MB — use chunked above this
 SQL_STATEMENTS_PER_CHUNK = 500
-CSV_ROWS_PER_CHUNK       = 10_000
-TXT_CHARS_PER_CHUNK      = 50_000
-JSON_ITEMS_PER_CHUNK     = 1_000
-PDF_PAGES_PER_CHUNK      = 10
-DOCX_PARAS_PER_CHUNK     = 200
+CSV_ROWS_PER_CHUNK       = 2_000    # each row-chunk processed in ~10-20 s on CPU
+TXT_CHARS_PER_CHUNK      = 30_000   # ~5-8 s per chunk
+JSON_ITEMS_PER_CHUNK     = 300
+PDF_PAGES_PER_CHUNK      = 5
+DOCX_PARAS_PER_CHUNK     = 100
 GRID_SIZE                = 4                  # 4×4 = 16 image tiles
 CONTEXT_OVERLAP          = 500               # chars shared with neighbours
+_CSV_CELL_BATCH          = 100               # rows per NLP call — higher is fine without BERT (spaCy scales linearly)
+_MAX_WORKERS             = 6                 # ThreadPoolExecutor threads; BERT releases GIL
 
-ProgressCallback = Callable[[int, int], None]   # (chunks_done, total_chunks)
+ProgressCallback = Callable[[int, str], None]   # (chunk_idx, status: "pending"|"processing"|"done"|"failed")
 
 
-def _noop_progress(done: int, total: int) -> None:  # noqa: ARG001
+def _noop_progress(chunk_idx: int, status: str) -> None:  # noqa: ARG001
     pass
 
 
@@ -77,6 +79,7 @@ def _pipeline_value_map(
     text: str,
     mode: str,
     column_name: str | None = None,
+    skip_transformer: bool = False,
 ) -> tuple[dict[str, str], list[dict[str, Any]], int, int]:
     """
     Run the 5-stage detection pipeline on *text* and return:
@@ -86,8 +89,11 @@ def _pipeline_value_map(
 
     Value-based replacement (rather than position-based) lets the same map
     be applied to any subset of the original text.
+
+    skip_transformer=True skips the BERT layer — use for CSV/JSON where
+    structured PII is fully covered by regex + spaCy but BERT costs ~2 s/call.
     """
-    analysis = pii_analyzer.analyze(text)
+    analysis = pii_analyzer.analyze(text, skip_transformer=skip_transformer)
     enriched = context_analyzer.analyze(
         analysis["cleaned_text"],
         analysis["presidio_results"],
@@ -156,6 +162,7 @@ def _build_summary(
         "pii_summary":          confidence_scorer.get_summary(all_to_mask),
         "layer_breakdown":      confidence_scorer.get_layer_breakdown(all_to_mask),
         "confidence_breakdown": {"high": high, "medium": medium},
+        "strategies_applied":   {},
         "total_pii":            len(all_to_mask),
         "chunk_count":          chunk_count,
     }
@@ -168,32 +175,40 @@ def _parallel_text_run(
     use_overlap: bool = True,
 ) -> list[_ChunkResult]:
     """
-    Process a list of text chunks in parallel and return results in order.
-    Each chunk worker may use neighbouring chunks as context overlap.
+    Process text chunks concurrently via ThreadPoolExecutor.
+
+    PyTorch / spaCy C-extensions release the GIL during inference, so multiple
+    threads genuinely overlap during the BERT forward pass.  Results are
+    collected in index order so the output is always deterministic.
     """
     total   = len(raw_chunks)
-    done    = 0
-    lock    = threading.Lock()
     results: dict[int, _ChunkResult] = {}
 
-    def worker(idx: int, content: str) -> _ChunkResult:
-        if use_overlap and total > 1:
-            before = raw_chunks[idx - 1][-CONTEXT_OVERLAP:] if idx > 0             else ""
-            after  = raw_chunks[idx + 1][:CONTEXT_OVERLAP]  if idx < total - 1 else ""
-            masked, to_mask, high, medium = _run_with_overlap(before, content, after, mode)
-        else:
-            repl_map, to_mask, high, medium = _pipeline_value_map(content, mode)
-            masked = _apply_map(content, repl_map)
-        return _ChunkResult(idx, masked, to_mask, high, medium)
+    for i in range(total):
+        progress_cb(i, "pending")
 
-    with ThreadPoolExecutor(max_workers=min(4, total)) as executor:
+    def worker(idx: int, content: str) -> _ChunkResult:
+        progress_cb(idx, "processing")
+        try:
+            if use_overlap and total > 1:
+                before = raw_chunks[idx - 1][-CONTEXT_OVERLAP:] if idx > 0         else ""
+                after  = raw_chunks[idx + 1][:CONTEXT_OVERLAP]  if idx < total - 1 else ""
+                masked, to_mask, high, medium = _run_with_overlap(before, content, after, mode)
+            else:
+                repl_map, to_mask, high, medium = _pipeline_value_map(content, mode)
+                masked = _apply_map(content, repl_map)
+            result = _ChunkResult(idx, masked, to_mask, high, medium)
+            progress_cb(idx, "done")
+            return result
+        except Exception:
+            progress_cb(idx, "failed")
+            raise
+
+    with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, total)) as executor:
         futures = {executor.submit(worker, i, chunk): i for i, chunk in enumerate(raw_chunks)}
         for future in as_completed(futures):
-            result = future.result()
-            results[result.index] = result
-            with lock:
-                done += 1
-                progress_cb(done, total)
+            r = future.result()
+            results[r.index] = r
 
     return [results[i] for i in range(total)]
 
@@ -254,48 +269,84 @@ def process_csv_chunked(
         df.iloc[i : i + CSV_ROWS_PER_CHUNK].copy()
         for i in range(0, max(1, len(df)), CSV_ROWS_PER_CHUNK)
     ]
-    total = len(row_groups)
-    done  = 0
-    lock  = threading.Lock()
-    results: dict[int, tuple[pd.DataFrame, list[dict], int, int]] = {}
-
-    def process_chunk(idx: int, chunk: pd.DataFrame):
-        all_to_mask:  list[dict[str, Any]] = []
-        total_high   = 0
-        total_medium = 0
-        result_df    = chunk.copy()
-
-        for col in chunk.columns:
-            if chunk[col].dtype == object:
-                values   = chunk[col].tolist()
-                joined   = " | ".join(str(v) for v in values)
-                repl_map, to_mask, high, medium = _pipeline_value_map(joined, mode, column_name=col)
-                all_to_mask.extend(to_mask)
-                total_high   += high
-                total_medium += medium
-                result_df[col] = [_apply_map(str(v), repl_map) for v in values]
-
-        return idx, result_df, all_to_mask, total_high, total_medium
-
-    with ThreadPoolExecutor(max_workers=min(4, total)) as executor:
-        futures = {executor.submit(process_chunk, i, grp): i for i, grp in enumerate(row_groups)}
-        for future in as_completed(futures):
-            idx, result_df, to_mask, high, medium = future.result()
-            results[idx] = (result_df, to_mask, high, medium)
-            with lock:
-                done += 1
-                progress_cb(done, total)
-
-    ordered_dfs  = [results[i][0] for i in range(total)]
+    total        = len(row_groups)
     all_to_mask: list[dict[str, Any]] = []
+    all_to_mask_lock = threading.Lock()
     total_high   = 0
     total_medium = 0
-    for _, to_mask, high, medium in results.values():
-        all_to_mask.extend(to_mask)
-        total_high   += high
-        total_medium += medium
+    write_lock   = threading.Lock()
+    write_header_flag = [True]   # mutable container so closure can update it
 
-    pd.concat(ordered_dfs, ignore_index=True).to_csv(output_path, index=False)
+    for i in range(total):
+        progress_cb(i, "pending")
+
+    def process_chunk(idx: int, chunk_df):
+        """Process one row-group: columns are analysed in parallel, then the
+        sanitised DataFrame is stream-appended to the output CSV."""
+        progress_cb(idx, "processing")
+        try:
+            result_df    = chunk_df.copy()
+            col_results: dict[str, list[str]] = {}
+            col_to_mask: list[dict[str, Any]] = []
+            col_lock     = threading.Lock()
+
+            def process_col(col: str):
+                values        = chunk_df[col].tolist()
+                col_sanitised: list[str] = []
+                local_mask:   list[dict[str, Any]] = []
+                for batch_start in range(0, len(values), _CSV_CELL_BATCH):
+                    batch   = values[batch_start: batch_start + _CSV_CELL_BATCH]
+                    joined  = " | ".join(str(v) for v in batch)
+                    # skip_transformer=True: BERT adds ~2s/call on CPU but CSV
+                    # column values are structured — regex + spaCy catch all of
+                    # emails, phones, SSNs, Aadhaar, PAN, credit cards, IPs.
+                    repl_map, to_mask, _, _ = _pipeline_value_map(
+                        joined, mode, column_name=col, skip_transformer=True
+                    )
+                    local_mask.extend(to_mask)
+                    col_sanitised.extend(_apply_map(str(v), repl_map) for v in batch)
+                with col_lock:
+                    col_results[col] = col_sanitised
+                    col_to_mask.extend(local_mask)
+
+            # Parallelise across columns — each column's NLP calls are independent
+            cols = list(chunk_df.columns)
+            with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(cols))) as col_exec:
+                col_futs = [col_exec.submit(process_col, c) for c in cols]
+                for f in as_completed(col_futs):
+                    f.result()  # re-raise any exception
+
+            for col in cols:
+                result_df[col] = col_results[col]
+
+            # Stream-append results in chunk order under a lock so CSV rows stay ordered
+            with write_lock:
+                is_first = write_header_flag[0]
+                result_df.to_csv(
+                    output_path,
+                    mode="w" if is_first else "a",
+                    header=is_first,
+                    index=False,
+                )
+                write_header_flag[0] = False
+
+            high   = sum(1 for r in col_to_mask if r.get("confidence") == "high")
+            medium = sum(1 for r in col_to_mask if r.get("confidence") == "medium")
+            progress_cb(idx, "done")
+            return col_to_mask, high, medium
+        except Exception:
+            progress_cb(idx, "failed")
+            raise
+
+    # Process row-chunks sequentially to preserve CSV row order in the output
+    # (columns within each chunk are still parallelised above)
+    for idx, grp in enumerate(row_groups):
+        to_mask, high, medium = process_chunk(idx, grp)
+        with all_to_mask_lock:
+            all_to_mask.extend(to_mask)
+            total_high   += high
+            total_medium += medium
+
     return _build_summary(all_to_mask, total_high, total_medium, total)
 
 
@@ -387,32 +438,38 @@ def process_json_chunked(
             data[i : i + JSON_ITEMS_PER_CHUNK]
             for i in range(0, max(1, len(data)), JSON_ITEMS_PER_CHUNK)
         ]
-        total = len(item_groups)
-        done  = 0
-        lock  = threading.Lock()
-        results: dict[int, tuple[list, list[dict], int, int]] = {}
+        total          = len(item_groups)
+        merged_items: list[Any]       = []
+        chunk_results: dict[int, tuple[list, list[dict], int, int]] = {}
+        results_lock   = threading.Lock()
+
+        for i in range(total):
+            progress_cb(i, "pending")
 
         def process_group(idx: int, items: list):
-            local_to_mask: list[dict[str, Any]] = []
-            counters:      dict[str, int]        = {}
-            sanitised = [_sanitise_json_node(item, mode, local_to_mask, counters) for item in items]
-            return idx, sanitised, local_to_mask, counters.get("high", 0), counters.get("medium", 0)
+            progress_cb(idx, "processing")
+            try:
+                local_to_mask: list[dict[str, Any]] = []
+                counters:      dict[str, int]        = {}
+                sanitised = [_sanitise_json_node(item, mode, local_to_mask, counters) for item in items]
+                progress_cb(idx, "done")
+                return idx, sanitised, local_to_mask, counters.get("high", 0), counters.get("medium", 0)
+            except Exception:
+                progress_cb(idx, "failed")
+                raise
 
-        with ThreadPoolExecutor(max_workers=min(4, total)) as executor:
+        with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, total)) as executor:
             futures = {executor.submit(process_group, i, grp): i for i, grp in enumerate(item_groups)}
             for future in as_completed(futures):
                 idx, sanitised, to_mask, high, medium = future.result()
-                results[idx] = (sanitised, to_mask, high, medium)
-                with lock:
-                    done += 1
-                    progress_cb(done, total)
+                with results_lock:
+                    chunk_results[idx] = (sanitised, to_mask, high, medium)
 
-        merged_items: list[Any]       = []
-        all_to_mask:  list[dict]      = []
+        all_to_mask:  list[dict] = []
         total_high   = 0
         total_medium = 0
         for i in range(total):
-            sanitised, to_mask, high, medium = results[i]
+            sanitised, to_mask, high, medium = chunk_results[i]
             merged_items.extend(sanitised)
             all_to_mask.extend(to_mask)
             total_high   += high
@@ -422,11 +479,13 @@ def process_json_chunked(
     else:
         all_to_mask:  list[dict[str, Any]] = []
         counters:     dict[str, int]        = {}
+        progress_cb(0, "pending")
+        progress_cb(0, "processing")
         output_data  = _sanitise_json_node(data, mode, all_to_mask, counters)
         total_high   = counters.get("high",   0)
         total_medium = counters.get("medium", 0)
         total        = 1
-        progress_cb(1, 1)
+        progress_cb(0, "done")
 
     with open(output_path, "w", encoding="utf-8") as fh:
         json.dump(output_data, fh, indent=indent, ensure_ascii=False)
@@ -471,40 +530,49 @@ def process_pdf_chunked(
         for i in range(0, max(1, page_count), PDF_PAGES_PER_CHUNK)
     ]
     total          = len(page_groups)
-    done           = 0
     lock           = threading.Lock()
     all_pii_values: set[str]          = set()
     all_to_mask:   list[dict[str, Any]] = []
     total_high     = 0
     total_medium   = 0
 
-    def detect_group(idx: int, page_indices: list[int]):
-        group_text = "\n".join(all_page_texts[i] for i in page_indices)
-        analysis   = pii_analyzer.analyze(group_text)
-        enriched   = context_analyzer.analyze(
-            analysis["cleaned_text"],
-            analysis["presidio_results"],
-            analysis["indic_results"],
-            analysis["label_pairs"],
-        )
-        deduped = confidence_scorer.deduplicate(enriched)
-        scored  = confidence_scorer.score_and_filter(deduped)
-        return idx, scored["to_mask"], scored["high_count"], scored["medium_count"]
+    for i in range(total):
+        progress_cb(i, "pending")
 
-    with ThreadPoolExecutor(max_workers=min(4, total)) as executor:
+    def detect_group(idx: int, page_indices: list[int]):
+        progress_cb(idx, "processing")
+        try:
+            group_text = "\n".join(all_page_texts[i] for i in page_indices)
+            analysis   = pii_analyzer.analyze(group_text)
+            enriched   = context_analyzer.analyze(
+                analysis["cleaned_text"],
+                analysis["presidio_results"],
+                analysis["indic_results"],
+                analysis["label_pairs"],
+            )
+            deduped = confidence_scorer.deduplicate(enriched)
+            scored  = confidence_scorer.score_and_filter(deduped)
+            progress_cb(idx, "done")
+            return scored["to_mask"], scored["high_count"], scored["medium_count"]
+        except Exception:
+            progress_cb(idx, "failed")
+            raise
+
+    with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, total)) as executor:
         futures = {executor.submit(detect_group, i, grp): i for i, grp in enumerate(page_groups)}
         for future in as_completed(futures):
-            _, to_mask, high, medium = future.result()
-            all_to_mask.extend(to_mask)
-            total_high   += high
-            total_medium += medium
-            for r in to_mask:
-                v = r.get("value", "")
-                if v:
-                    all_pii_values.add(v)
-            with lock:
-                done += 1
-                progress_cb(done, total)
+            try:
+                to_mask, high, medium = future.result()
+                with lock:
+                    all_to_mask.extend(to_mask)
+                    total_high   += high
+                    total_medium += medium
+                    for r in to_mask:
+                        v = r.get("value", "")
+                        if v:
+                            all_pii_values.add(v)
+            except Exception:
+                pass  # progress already set to failed inside detect_group
 
     # Apply redactions single-threaded (PyMuPDF write requirement)
     for page in doc:
@@ -574,35 +642,46 @@ def process_docx_chunked(
         paras[i : i + DOCX_PARAS_PER_CHUNK]
         for i in range(0, max(1, len(paras)), DOCX_PARAS_PER_CHUNK)
     ]
-    total = len(para_groups)
-    done  = 0
-    lock  = threading.Lock()
-    results: dict[int, tuple[dict[str, str], list[dict], int, int]] = {}
-
-    def detect_group(idx: int, group: list[Any]):
-        chunk_text = "\n".join(" ".join(r.text for r in p.runs) for p in group)
-        if not chunk_text.strip():
-            return idx, {}, [], 0, 0
-        repl_map, to_mask, high, medium = _pipeline_value_map(chunk_text, mode)
-        return idx, repl_map, to_mask, high, medium
-
-    # Detection in parallel
-    with ThreadPoolExecutor(max_workers=min(4, total)) as executor:
-        futures = {executor.submit(detect_group, i, grp): i for i, grp in enumerate(para_groups)}
-        for future in as_completed(futures):
-            idx, repl_map, to_mask, high, medium = future.result()
-            results[idx] = (repl_map, to_mask, high, medium)
-            with lock:
-                done += 1
-                progress_cb(done, total)
-
-    all_to_mask:  list[dict[str, Any]] = []
+    total        = len(para_groups)
+    lock         = threading.Lock()
+    det_results: dict[int, tuple[dict[str, str], list[dict], int, int]] = {}
+    all_to_mask: list[dict[str, Any]] = []
     total_high   = 0
     total_medium = 0
 
-    # Apply replacements single-threaded (python-docx write requirement)
+    for i in range(total):
+        progress_cb(i, "pending")
+
+    def detect_group(idx: int, group: list[Any]):
+        progress_cb(idx, "processing")
+        try:
+            chunk_text = "\n".join(" ".join(r.text for r in p.runs) for p in group)
+            if not chunk_text.strip():
+                progress_cb(idx, "done")
+                return idx, {}, [], 0, 0
+            repl_map, to_mask, high, medium = _pipeline_value_map(chunk_text, mode)
+            progress_cb(idx, "done")
+            return idx, repl_map, to_mask, high, medium
+        except Exception:
+            progress_cb(idx, "failed")
+            raise
+
+    # Detection in parallel (python-docx reads are thread-safe)
+    with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, total)) as executor:
+        futures = {executor.submit(detect_group, i, grp): i for i, grp in enumerate(para_groups)}
+        for future in as_completed(futures):
+            chunk_idx = futures[future]
+            try:
+                idx, repl_map, to_mask, high, medium = future.result()
+                with lock:
+                    det_results[idx] = (repl_map, to_mask, high, medium)
+            except Exception:
+                with lock:
+                    det_results[chunk_idx] = ({}, [], 0, 0)
+
+    # Apply replacements single-threaded (python-docx writes are NOT thread-safe)
     for i, group in enumerate(para_groups):
-        repl_map, to_mask, high, medium = results[i]
+        repl_map, to_mask, high, medium = det_results[i]
         all_to_mask.extend(to_mask)
         total_high   += high
         total_medium += medium
@@ -653,44 +732,54 @@ def process_image_chunked(
         for col in range(GRID_SIZE)
     ]
     total          = len(tiles)
-    done           = 0
     lock           = threading.Lock()
     all_pii_values: set[str]           = set()
     all_to_mask:   list[dict[str, Any]] = []
     total_high     = 0
     total_medium   = 0
 
-    def detect_tile(tile_info: tuple[int, int, int, int, int]):
-        _, x0, y0, x1, y1 = tile_info
-        tile_img  = img.crop((x0, y0, x1, y1))
-        tile_text = pytesseract.image_to_string(tile_img)
-        if not tile_text.strip():
-            return [], 0, 0
-        analysis = pii_analyzer.analyze(tile_text)
-        enriched = context_analyzer.analyze(
-            analysis["cleaned_text"],
-            analysis["presidio_results"],
-            analysis["indic_results"],
-            analysis["label_pairs"],
-        )
-        deduped = confidence_scorer.deduplicate(enriched)
-        scored  = confidence_scorer.score_and_filter(deduped)
-        return scored["to_mask"], scored["high_count"], scored["medium_count"]
+    for i in range(total):
+        progress_cb(i, "pending")
 
-    with ThreadPoolExecutor(max_workers=min(4, total)) as executor:
+    def detect_tile(tile_info: tuple[int, int, int, int, int]):
+        tile_idx, x0, y0, x1, y1 = tile_info
+        progress_cb(tile_idx, "processing")
+        try:
+            tile_img  = img.crop((x0, y0, x1, y1))
+            tile_text = pytesseract.image_to_string(tile_img)
+            if not tile_text.strip():
+                progress_cb(tile_idx, "done")
+                return [], 0, 0
+            analysis = pii_analyzer.analyze(tile_text)
+            enriched = context_analyzer.analyze(
+                analysis["cleaned_text"],
+                analysis["presidio_results"],
+                analysis["indic_results"],
+                analysis["label_pairs"],
+            )
+            deduped = confidence_scorer.deduplicate(enriched)
+            scored  = confidence_scorer.score_and_filter(deduped)
+            progress_cb(tile_idx, "done")
+            return scored["to_mask"], scored["high_count"], scored["medium_count"]
+        except Exception:
+            progress_cb(tile_idx, "failed")
+            raise
+
+    with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, total)) as executor:
         futures = {executor.submit(detect_tile, t): t[0] for t in tiles}
         for future in as_completed(futures):
-            to_mask, high, medium = future.result()
-            all_to_mask.extend(to_mask)
-            total_high   += high
-            total_medium += medium
-            for r in to_mask:
-                v = r.get("value", "")
-                if v:
-                    all_pii_values.add(v)
-            with lock:
-                done += 1
-                progress_cb(done, total)
+            try:
+                to_mask, high, medium = future.result()
+                with lock:
+                    all_to_mask.extend(to_mask)
+                    total_high   += high
+                    total_medium += medium
+                    for r in to_mask:
+                        v = r.get("value", "")
+                        if v:
+                            all_pii_values.add(v)
+            except Exception:
+                pass  # progress set to failed inside detect_tile
 
     # Redact on the full image using word-level OCR bounding boxes
     ocr_data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
@@ -715,98 +804,18 @@ def process_image_chunked(
     return _build_summary(all_to_mask, total_high, total_medium, total)
 
 
-# ── Public interface ───────────────────────────────────────────────────────────
+# ── Public dispatch table ─────────────────────────────────────────────────────
 
-def should_use_chunked(input_path: str) -> bool:
-    """Return True if the file is large enough to warrant parallel chunked processing."""
-    from chunking.config import needs_chunking
-    return needs_chunking(input_path)
-
-
-def _get_chunker(ft: str):
-    """Return a fresh chunker instance for *ft*."""
-    if ft == "sql":
-        from chunking.sql_chunker import SQLChunker
-        return SQLChunker()
-    if ft == "csv":
-        from chunking.csv_chunker import CSVChunker
-        return CSVChunker()
-    if ft in {"txt", "md"}:
-        from chunking.txt_chunker import TXTChunker
-        return TXTChunker()
-    if ft == "json":
-        from chunking.json_chunker import JSONChunker
-        return JSONChunker()
-    if ft == "pdf":
-        from chunking.pdf_chunker import PDFChunker
-        return PDFChunker()
-    if ft in {"docx", "doc"}:
-        from chunking.docx_chunker import DOCXChunker
-        return DOCXChunker()
-    if ft in {"png", "jpg", "jpeg", "tiff", "bmp", "webp"}:
-        from chunking.image_chunker import ImageChunker
-        return ImageChunker()
-    raise ValueError(f"Unsupported file type for chunked processing: {ft!r}")
-
-
-def _call_merge(
-    chunker,
-    ft: str,
-    results: list,
-    chunk_metas: list,
-    out_paths: list[str],
-    output_path: str,
-    original_file_path: str,
-) -> None:
-    """Dispatch to the correct merge signature for each file type."""
-    if ft == "json":
-        chunker.merge(
-            results, out_paths, output_path, original_file_path,
-            chunker.chunk_type, chunker.array_key,
-        )
-    elif ft in {"png", "jpg", "jpeg", "tiff", "bmp", "webp"}:
-        chunker.merge(results, out_paths, chunk_metas, output_path, original_file_path, ft)
-    elif ft == "pdf":
-        chunker.merge(results, out_paths, output_path, original_file_path, chunk_metas)
-    else:
-        # SQL, CSV, TXT, DOCX
-        chunker.merge(results, out_paths, output_path, original_file_path)
-
-
-def dispatch_chunked(
-    input_path:  str,
-    output_path: str,
-    file_type:   str,
-    mode:        str              = "redact",
-    progress_cb: ProgressCallback = _noop_progress,
-) -> dict[str, Any]:
-    """
-    Split *input_path* into format-aware chunks, run PII detection on every
-    chunk in parallel via the chunking package, merge outputs into
-    *output_path*, and return aggregated PII statistics.
-    """
-    from chunking.config import get_chunk_config
-    from chunking.parallel_processor import parallel_processor as pp
-
-    ft = file_type.lower().lstrip(".")
-
-    chunker     = _get_chunker(ft)
-    chunk_metas = chunker.split(input_path)
-    cfg         = get_chunk_config(ft)
-
-    results  = pp.process_chunks_parallel(chunk_metas, ft, mode, cfg.get("max_workers", 4))
-    out_paths = [m.temp_output_path for m in chunk_metas]
-
-    _call_merge(chunker, ft, results, chunk_metas, out_paths, output_path, input_path)
-    chunker.cleanup(chunk_metas)
-
-    agg = pp.aggregate_results(results)
-    progress_cb(agg["completed_chunks"], agg["total_chunks"])
-
-    return {
-        "pii_summary":          agg["pii_summary"],
-        "layer_breakdown":      agg["layer_breakdown"],
-        "confidence_breakdown": {},
-        "total_pii":            agg["total_pii"],
-        "chunk_count":          agg["total_chunks"],
-    }
+CHUNKED_FUNCS: dict[str, Any] = {
+    "sql":  process_sql_chunked,
+    "csv":  process_csv_chunked,
+    "txt":  process_txt_chunked,
+    "md":   process_txt_chunked,
+    "json": process_json_chunked,
+    "pdf":  process_pdf_chunked,
+    "docx": process_docx_chunked,
+    "doc":  process_docx_chunked,
+    "png":  process_image_chunked,
+    "jpg":  process_image_chunked,
+    "jpeg": process_image_chunked,
+}

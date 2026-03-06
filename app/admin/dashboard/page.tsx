@@ -34,6 +34,7 @@ import { headers } from "next/headers";
 import { getEncryptionStatus } from "@/lib/get-encryption-status";
 import type { EncryptionStatus } from "@/lib/get-encryption-status";
 import { SecurityStatusCard } from "@/components/SecurityStatusCard";
+import { AIModelStatusCard } from "@/components/AIModelStatusCard";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -204,8 +205,9 @@ export default async function AdminDashboardPage() {
             </div>
 
             {/* Security status */}
-            <div className="mb-8">
+            <div className="mb-8 grid gap-4 lg:grid-cols-2">
                 <SecurityStatusCard initial={encRes} />
+                <AIModelStatusCard />
             </div>
 
             {/* Recent uploads table */}

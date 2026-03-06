@@ -3,7 +3,18 @@ import { NextResponse } from "next/server";
 /**
  * GET /api/health
  * Proxies the Python service health check so the frontend never needs to
- * talk directly to :8000. Returns the raw JSON plus an `available` flag.
+ * talk directly to :8000.
+ *
+ * Python response shape (new pipeline):
+ * {
+ *   status: "ok" | "loading",
+ *   models: { presidio, spacy_fast, spacy_full, errors },
+ *   service: string,
+ *   model_loaded: boolean,
+ *   ...
+ * }
+ *
+ * We pass through the entire response and add `available: true/false`.
  */
 export async function GET() {
   const pythonUrl = process.env.PYTHON_SERVICE_URL ?? "http://localhost:8000";
@@ -16,7 +27,12 @@ export async function GET() {
 
     if (!res.ok) {
       return NextResponse.json(
-        { available: false, model_loaded: false },
+        {
+          available: false,
+          status: "loading",
+          model_loaded: false,
+          models: { presidio: false, spacy_fast: false, spacy_full: false, errors: [] },
+        },
         { status: 200 },
       );
     }
@@ -25,7 +41,12 @@ export async function GET() {
     return NextResponse.json({ available: true, ...data });
   } catch {
     return NextResponse.json(
-      { available: false, model_loaded: false },
+      {
+        available: false,
+        status: "loading",
+        model_loaded: false,
+        models: { presidio: false, spacy_fast: false, spacy_full: false, errors: [] },
+      },
       { status: 200 },
     );
   }

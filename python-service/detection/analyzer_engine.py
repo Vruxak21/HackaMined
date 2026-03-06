@@ -41,8 +41,15 @@ class PIIAnalyzer:
 
         registry = RecognizerRegistry()
         registry.load_predefined_recognizers()
-        for recognizer in get_custom_recognizers():
+        custom_recognizers = get_custom_recognizers()
+        for recognizer in custom_recognizers:
             registry.add_recognizer(recognizer)
+
+        # Build set of entity types exclusively covered by our custom regex
+        # recognizers (Layer 1) so we can correctly label Presidio results.
+        self._regex_entity_types: set[str] = {
+            ent for rec in custom_recognizers for ent in rec.supported_entities
+        }
 
         self.analyzer = AnalyzerEngine(
             nlp_engine=nlp_engine,
@@ -50,9 +57,13 @@ class PIIAnalyzer:
             supported_languages=["en"],
         )
 
-        # ── Layer 3: indic-bert ───────────────────────────────────────────────
-        # Force transformers to use PyTorch backend to avoid TensorFlow's
-        # NumPy 2.x incompatibility (crashes before Python can catch the error).
+        # ── Layer 3: Transformer NER ──────────────────────────────────────────
+        # Use dslim/bert-base-NER — a publicly accessible, fine-tuned NER model
+        # that reliably detects PER, ORG, LOC, MISC entities (including
+        # anglicised Indian names as they appear in official documents).
+        # ai4bharat/indic-bert is a gated HuggingFace repo requiring auth and
+        # is a base MLM model (not fine-tuned for token-classification), so
+        # it cannot be used directly for NER.
         import os  # noqa: PLC0415
         os.environ.setdefault("USE_TF", "0")
         os.environ.setdefault("USE_TORCH", "1")
@@ -61,11 +72,12 @@ class PIIAnalyzer:
 
             self.indic_ner = pipeline(
                 "token-classification",
-                model="ai4bharat/indic-bert",
+                model="dslim/bert-base-NER",
                 aggregation_strategy="simple",
             )
-        except Exception:
-            logger.info("indic-bert unavailable, falling back to spaCy only")
+            logger.info("Transformer NER (dslim/bert-base-NER) loaded successfully")
+        except Exception as exc:
+            logger.warning("Transformer NER unavailable, falling back to spaCy only: %s", exc)
             self.indic_ner = None
 
         # ── Shared utilities ──────────────────────────────────────────────────
@@ -74,9 +86,23 @@ class PIIAnalyzer:
 
     # ─────────────────────────────────────────────────────────────────────────
 
-    def analyze(self, text: str, language: str = "en") -> dict[str, Any]:
+    def analyze(
+        self,
+        text: str,
+        language: str = "en",
+        skip_transformer: bool = False,
+    ) -> dict[str, Any]:
         """
         Run all three detection layers on *text*.
+
+        Parameters
+        ----------
+        skip_transformer :
+            When True, skip the BERT/transformer layer (Layer 3) entirely.
+            Use this for structured data (CSV, JSON) where regex + spaCy
+            already catches all PII and BERT just adds latency (~2 s/call
+            on CPU).  Natural-language formats (TXT, DOCX, PDF, SQL) should
+            leave this False so names embedded in prose are still detected.
 
         Returns
         -------
@@ -100,9 +126,19 @@ class PIIAnalyzer:
             entities=self.target_entities,
             return_decision_process=True,
         )
-        # Annotate source so downstream consumers can distinguish layers
+        # Annotate source so downstream consumers can distinguish layers.
+        # Custom PatternRecognizers (Layer 1 regex) are identified by their
+        # entity type; everything else comes from Presidio's built-in
+        # recognizers + spaCy NLP (Layer 2).
         for result in presidio_results:
-            result.recognition_metadata["source"] = "presidio_spacy"  # type: ignore[index]
+            if result.recognition_metadata is None:  # type: ignore[union-attr]
+                result.recognition_metadata = {}  # type: ignore[assignment]
+            source = (
+                "regex"
+                if result.entity_type in self._regex_entity_types
+                else "presidio_spacy"
+            )
+            result.recognition_metadata["source"] = source  # type: ignore[index]
 
         # Filter spaCy false positives: label/field keywords (e.g. "Email",
         # "Phone", "Name") are sometimes tagged as PERSON/LOCATION by the small
@@ -128,8 +164,10 @@ class PIIAnalyzer:
         ]
 
         # Step 4: Layer 3 — indic-bert NER
+        # Skipped for structured data (CSV/JSON) — BERT adds ~2 s per call on
+        # CPU while regex + spaCy already catches all structured PII.
         indic_results: list[dict[str, Any]] = []
-        if self.indic_ner is not None:
+        if self.indic_ner is not None and not skip_transformer:
             raw = self.indic_ner(cleaned[:512])
             for entity in raw:
                 group = entity.get("entity_group", "")

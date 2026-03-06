@@ -4,6 +4,10 @@ CSV parser using pandas.
 Processes each column independently, passing the column header as context so
 the ContextAnalyzer can apply column-name boosts.  Cell-level replacements are
 written back into the DataFrame before saving as CSV.
+
+Each column is processed in small batches (CELL_BATCH_SIZE rows at a time) so
+the NLP models never receive a multi-megabyte joined string, which would be
+extremely slow and would exceed BERT's 512-token window.
 """
 
 from __future__ import annotations
@@ -20,21 +24,25 @@ from detection.preprocessor import TextPreprocessor
 
 _preprocessor = TextPreprocessor()
 
+# Maximum number of rows joined into a single NLP call per column batch.
+# Keeps each joined string under ~5–10 KB, which is fast for both spaCy and
+# BERT (512-token limit means content beyond that is already truncated).
+_CELL_BATCH_SIZE = 200
 
-def _process_column(
+
+def _process_batch(
     col_name: str,
-    values: list[str],
+    batch_values: list[str],
     mode: str,
 ) -> tuple[list[str], list[dict[str, Any]], int, int]:
     """
-    Run the full pipeline on all values in a single column joined as one text
-    block, then map replacements back to individual cell strings.
+    Run the full PII pipeline on a small batch of cell values joined as one
+    text block, then map replacements back to individual cell strings.
 
     Returns (sanitised_values, to_mask, high_count, medium_count).
     """
-    # Join cells with a sentinel separator so positions stay deterministic
     separator = " | "
-    joined = separator.join(str(v) for v in values)
+    joined = separator.join(str(v) for v in batch_values)
 
     analysis = pii_analyzer.analyze(joined)
     enriched = context_analyzer.analyze(
@@ -48,7 +56,7 @@ def _process_column(
     scored = confidence_scorer.score_and_filter(deduped)
     to_mask = scored["to_mask"]
 
-    # Build per-value replacement map
+    # Build per-value replacement map from detected spans
     replacement_map: dict[str, str] = {}
     for result in to_mask:
         value = result.get("value", "")
@@ -62,13 +70,39 @@ def _process_column(
         replacement_map[value] = single_out["masked_text"]
 
     sanitised: list[str] = []
-    for v in values:
+    for v in batch_values:
         cell = str(v)
         for original, replacement in replacement_map.items():
             cell = cell.replace(original, replacement)
         sanitised.append(cell)
 
     return sanitised, to_mask, scored["high_count"], scored["medium_count"]
+
+
+def _process_column(
+    col_name: str,
+    values: list[str],
+    mode: str,
+) -> tuple[list[str], list[dict[str, Any]], int, int]:
+    """
+    Process all values in a column in batches of _CELL_BATCH_SIZE.
+
+    Returns (sanitised_values, to_mask, high_count, medium_count).
+    """
+    all_sanitised: list[str] = []
+    all_to_mask: list[dict[str, Any]] = []
+    total_high = 0
+    total_medium = 0
+
+    for batch_start in range(0, len(values), _CELL_BATCH_SIZE):
+        batch = values[batch_start: batch_start + _CELL_BATCH_SIZE]
+        san, to_mask, high, medium = _process_batch(col_name, batch, mode)
+        all_sanitised.extend(san)
+        all_to_mask.extend(to_mask)
+        total_high += high
+        total_medium += medium
+
+    return all_sanitised, all_to_mask, total_high, total_medium
 
 
 def process_csv(

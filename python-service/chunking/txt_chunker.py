@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+import tempfile
 from pathlib import Path
 from typing import List
 
@@ -28,6 +29,9 @@ from chunking.chunk_models import ChunkMetadata, ChunkResult
 from chunking.config import get_chunk_config
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CHUNK_SIZE = 100_000  # chars per chunk
+CONTEXT_OVERLAP = 500         # chars shared with neighbours
 
 _MARKER_BEFORE = "###OVERLAP_BEFORE###"
 _MARKER_AFTER = "###OVERLAP_AFTER###"
@@ -63,19 +67,23 @@ class TXTChunker:
     # split
     # ------------------------------------------------------------------
 
-    def split(self, file_path: str) -> List[ChunkMetadata]:
+    def split(self, file_path: str, chunk_size: int | None = None) -> List[ChunkMetadata]:
         """
         Read *file_path*, group its paragraphs into chunks not exceeding
-        *chars_per_chunk*, and write one temp .txt file per chunk.
+        *chunk_size* chars, and write one temp .txt file per chunk.
+
+        Parameters
+        ----------
+        chunk_size:
+            Characters per chunk. Falls back to DEFAULT_CHUNK_SIZE if not provided.
 
         Returns
         -------
         list[ChunkMetadata]
             One entry per chunk (temp files already written).
         """
-        config = get_chunk_config("txt")
-        chars_per_chunk: int = config["chars_per_chunk"]
-        overlap_chars: int = config["overlap_chars"]
+        chars_per_chunk: int = chunk_size or DEFAULT_CHUNK_SIZE
+        overlap_chars: int = CONTEXT_OVERLAP
 
         content = Path(file_path).read_text(encoding="utf-8", errors="replace")
 
@@ -110,7 +118,7 @@ class TXTChunker:
 
         total_chunks = len(chunk_groups)
         file_id = _get_file_id(file_path)
-        tmp_dir = Path("/tmp")
+        tmp_dir = Path(tempfile.gettempdir())
 
         # Track approximate character positions in the original file
         char_pos = 0
@@ -242,3 +250,169 @@ class TXTChunker:
                     os.remove(path)
                 except OSError:
                     pass
+
+
+# ── Module-level chunked processing function ──────────────────────────────────
+
+def _noop_progress(chunk_idx: int, status: str) -> None:  # noqa: ARG001
+    pass
+
+
+def _split_at_paragraphs(text: str, chunk_size: int) -> list[str]:
+    """
+    Split *text* at paragraph boundaries (\\n\\n) into groups of
+    approximately *chunk_size* characters.  If a paragraph exceeds
+    chunk_size, split at sentence boundaries (period + space).
+    Never split mid-word.
+    """
+    import re as _re
+
+    parts = _re.split(r"(\n\n+)", text)
+    chunks: list[str] = []
+    current = ""
+
+    for part in parts:
+        # If adding this part exceeds the limit and we have content, flush
+        if len(current) + len(part) > chunk_size and current:
+            chunks.append(current)
+            current = ""
+
+        # If even a single part exceeds chunk_size, split at sentence boundaries
+        if len(part) > chunk_size:
+            sentences = _re.split(r"(?<=\. )", part)
+            for sentence in sentences:
+                if len(current) + len(sentence) > chunk_size and current:
+                    chunks.append(current)
+                    current = ""
+                current += sentence
+        else:
+            current += part
+
+    if current:
+        chunks.append(current)
+
+    return chunks or [text]
+
+
+def process_txt_chunked(
+    input_path: str,
+    output_path: str,
+    mode: str = "redact",
+    config: dict | None = None,
+    progress_cb=_noop_progress,
+) -> dict:
+    """
+    End-to-end chunked TXT processing with the new pipeline.
+
+    1. Read file.
+    2. Split at paragraph boundaries into chunks of config["chunk_size"] chars.
+    3. Run detect_pii_batch() on all chunks.
+    4. Build replacement maps and apply masking per chunk.
+    5. Write output.
+    6. Return summary dict.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from pathlib import Path
+
+    from detection.masker import pii_masker
+    from pipeline.detector import detect_pii_batch
+
+    if config is None:
+        config = {"use_regex": True, "use_spacy": True, "use_bert": False,
+                  "spacy_model": "en_core_web_sm", "chunk_size": DEFAULT_CHUNK_SIZE,
+                  "workers": 4}
+
+    chunk_size = config.get("chunk_size", DEFAULT_CHUNK_SIZE)
+    workers = config.get("workers", 4)
+
+    text = Path(input_path).read_text(encoding="utf-8", errors="replace")
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    raw_chunks = _split_at_paragraphs(text, chunk_size)
+    total = len(raw_chunks)
+
+    for i in range(total):
+        progress_cb(i, "pending")
+
+    # ── Detection: batch all chunks at once ───────────────────────────────
+    # Build detection input with context overlap from neighbours
+    detection_texts: list[str] = []
+    for idx, chunk in enumerate(raw_chunks):
+        before = raw_chunks[idx - 1][-CONTEXT_OVERLAP:] if idx > 0 else ""
+        after = raw_chunks[idx + 1][:CONTEXT_OVERLAP] if idx < total - 1 else ""
+        detection_texts.append(before + chunk + after)
+
+    all_chunk_detections = detect_pii_batch(detection_texts, config)
+
+    # ── Masking: build replacement map per chunk and apply ───────────────
+    all_detections: list[dict] = []
+    masked_chunks: list[str] = []
+
+    for idx, chunk in enumerate(raw_chunks):
+        progress_cb(idx, "processing")
+        try:
+            detections = all_chunk_detections[idx]
+            all_detections.extend(detections)
+
+            replacement_map: dict[str, str] = {}
+            for det in detections:
+                val = det["value"]
+                if not val or val in replacement_map:
+                    continue
+                if mode == "redact":
+                    replacement_map[val] = "[REDACTED]"
+                elif mode == "mask":
+                    replacement_map[val] = pii_masker.get_partial_mask(
+                        val, det["entity_type"]
+                    )
+                elif mode == "tokenize":
+                    replacement_map[val] = pii_masker.get_token(det["entity_type"])
+                else:
+                    replacement_map[val] = "[REDACTED]"
+
+            # Apply replacements, longest first to avoid partial matches
+            masked = chunk
+            for original in sorted(replacement_map, key=len, reverse=True):
+                masked = masked.replace(original, replacement_map[original])
+
+            masked_chunks.append(masked)
+            progress_cb(idx, "done")
+        except Exception:
+            masked_chunks.append(chunk)  # preserve original on failure
+            progress_cb(idx, "failed")
+            raise
+
+    # ── Write output ──────────────────────────────────────────────────────
+    Path(output_path).write_text("".join(masked_chunks), encoding="utf-8")
+
+    return _build_txt_summary(all_detections, total)
+
+
+def _build_txt_summary(detections: list[dict], chunk_count: int) -> dict:
+    """Build the standard summary dict from a flat list of detection results."""
+    pii_summary: dict[str, int] = {}
+    layer_breakdown: dict[str, int] = {"regex": 0, "spacy": 0, "bert": 0}
+    high = medium = 0
+
+    for det in detections:
+        et = det["entity_type"]
+        pii_summary[et] = pii_summary.get(et, 0) + 1
+        layer = det.get("layer", "regex")
+        if layer in layer_breakdown:
+            layer_breakdown[layer] += 1
+        else:
+            layer_breakdown[layer] = 1
+        score = det.get("score", 0)
+        if score >= 0.85:
+            high += 1
+        elif score >= 0.60:
+            medium += 1
+
+    return {
+        "pii_summary":          pii_summary,
+        "total_pii":            len(detections),
+        "layer_breakdown":      layer_breakdown,
+        "confidence_breakdown": {"high": high, "medium": medium},
+        "chunk_count":          chunk_count,
+    }

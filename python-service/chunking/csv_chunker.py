@@ -15,6 +15,7 @@ import csv
 import logging
 import math
 import os
+import tempfile
 import uuid
 from pathlib import Path
 from typing import List
@@ -23,6 +24,8 @@ from chunking.chunk_models import ChunkMetadata, ChunkResult
 from chunking.config import get_chunk_config
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CHUNK_SIZE = 10_000  # rows per chunk
 
 
 class CSVChunker:
@@ -51,20 +54,24 @@ class CSVChunker:
     # split
     # ------------------------------------------------------------------
 
-    def split(self, file_path: str) -> List[ChunkMetadata]:
+    def split(self, file_path: str, chunk_size: int | None = None) -> List[ChunkMetadata]:
         """
         Read *file_path* and write one temp CSV file per chunk.
 
         Each chunk file contains the original header row followed by the
         rows for that chunk — making it a valid standalone CSV.
 
+        Parameters
+        ----------
+        chunk_size:
+            Rows per chunk. Falls back to DEFAULT_CHUNK_SIZE if not provided.
+
         Returns
         -------
         list[ChunkMetadata]
             One entry per chunk (already written to disk).
         """
-        config = get_chunk_config("csv")
-        rows_per_chunk: int = config["rows_per_chunk"]
+        rows_per_chunk: int = chunk_size or DEFAULT_CHUNK_SIZE
 
         # ── Step 1: read header + all data rows ──────────────────────────
         with open(file_path, "r", encoding="utf-8", errors="replace", newline="") as fh:
@@ -85,7 +92,7 @@ class CSVChunker:
         total_chunks = math.ceil(total_rows / rows_per_chunk)
 
         file_id = self.get_file_id(file_path)
-        tmp_dir = Path("/tmp")
+        tmp_dir = Path(tempfile.gettempdir())
         chunk_list: List[ChunkMetadata] = []
 
         # ── Step 3: write each chunk ──────────────────────────────────────
@@ -242,3 +249,175 @@ class CSVChunker:
                     os.remove(path)
                 except OSError:
                     pass  # already gone or never created
+
+
+# ── Module-level chunked processing function ──────────────────────────────────
+
+def _noop_progress(chunk_idx: int, status: str) -> None:  # noqa: ARG001
+    pass
+
+
+def process_csv_chunked(
+    input_path: str,
+    output_path: str,
+    mode: str = "redact",
+    config: dict | None = None,
+    progress_cb=_noop_progress,
+) -> dict:
+    """
+    End-to-end chunked CSV processing with the new pipeline.
+
+    1. Read CSV with pandas.
+    2. Split into row-group chunks of config["chunk_size"] rows.
+    3. For each chunk, sample ≤ 500 rows per column for PII detection.
+    4. Call detect_pii_batch() on all column sample texts at once.
+    5. Build per-column replacement maps.
+    6. Apply vectorized masking via pandas str.replace().
+    7. Stream-append each processed chunk to the output CSV.
+    8. Return summary dict.
+    """
+    import re as _re
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from pathlib import Path
+
+    import pandas as pd
+
+    from detection.masker import pii_masker
+    from pipeline.detector import detect_pii_batch
+
+    if config is None:
+        config = {"use_regex": True, "use_spacy": False, "use_bert": False,
+                  "chunk_size": DEFAULT_CHUNK_SIZE, "workers": 8}
+
+    chunk_size = config.get("chunk_size", DEFAULT_CHUNK_SIZE)
+    workers = config.get("workers", 8)
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    df = pd.read_csv(input_path, dtype=str, keep_default_na=False)
+    row_groups = [
+        df.iloc[i : i + chunk_size].copy()
+        for i in range(0, max(1, len(df)), chunk_size)
+    ]
+    total = len(row_groups)
+
+    all_detections: list[dict] = []
+    detection_lock = threading.Lock()
+    write_lock = threading.Lock()
+    write_header_flag = [True]
+
+    for i in range(total):
+        progress_cb(i, "pending")
+
+    def _process_chunk(idx: int, chunk_df: pd.DataFrame):
+        progress_cb(idx, "processing")
+        try:
+            column_names = list(chunk_df.columns)
+
+            # ── Detection: sample ≤ 500 rows per column, batch all columns ──
+            sample_size = min(500, len(chunk_df))
+            sample_df = chunk_df.head(sample_size)
+
+            column_texts = []
+            for col in column_names:
+                column_texts.append(" | ".join(sample_df[col].astype(str).tolist()))
+
+            column_detections = detect_pii_batch(column_texts, config)
+
+            # ── Build per-column replacement maps ────────────────────────────
+            chunk_detections: list[dict] = []
+            replacement_maps: dict[str, dict[str, str]] = {}
+
+            for col_idx, col in enumerate(column_names):
+                col_dets = column_detections[col_idx]
+                chunk_detections.extend(col_dets)
+                repl_map: dict[str, str] = {}
+                for det in col_dets:
+                    val = det["value"]
+                    if not val or val in repl_map:
+                        continue
+                    if mode == "redact":
+                        repl_map[val] = "[REDACTED]"
+                    elif mode == "mask":
+                        repl_map[val] = pii_masker.get_partial_mask(
+                            val, det["entity_type"]
+                        )
+                    elif mode == "tokenize":
+                        repl_map[val] = pii_masker.get_token(det["entity_type"])
+                    else:
+                        repl_map[val] = "[REDACTED]"
+                replacement_maps[col] = repl_map
+
+            # ── Vectorized masking ────────────────────────────────────────────
+            result_df = chunk_df.copy()
+            for col in column_names:
+                repl_map = replacement_maps.get(col, {})
+                if not repl_map:
+                    continue
+                pii_values = sorted(repl_map.keys(), key=len, reverse=True)
+                pattern = "|".join(_re.escape(v) for v in pii_values)
+
+                def _make_replacer(rmap):
+                    def replacer(match):
+                        return rmap.get(match.group(0), match.group(0))
+                    return replacer
+
+                result_df[col] = result_df[col].astype(str).str.replace(
+                    pattern, _make_replacer(repl_map), regex=True
+                )
+
+            # ── Stream-append to output ───────────────────────────────────────
+            with write_lock:
+                is_first = write_header_flag[0]
+                result_df.to_csv(
+                    output_path,
+                    mode="w" if is_first else "a",
+                    header=is_first,
+                    index=False,
+                )
+                write_header_flag[0] = False
+
+            with detection_lock:
+                all_detections.extend(chunk_detections)
+
+            progress_cb(idx, "done")
+        except Exception:
+            progress_cb(idx, "failed")
+            raise
+
+    # Process chunks sequentially to preserve CSV row order in stream-append
+    # (detection within each chunk uses batch API already)
+    for idx, grp in enumerate(row_groups):
+        _process_chunk(idx, grp)
+
+    return _build_csv_summary(all_detections, total)
+
+
+def _build_csv_summary(detections: list[dict], chunk_count: int) -> dict:
+    """Build the standard summary dict from a flat list of detection results."""
+    pii_summary: dict[str, int] = {}
+    layer_breakdown: dict[str, int] = {"regex": 0, "spacy": 0, "bert": 0}
+    high = medium = 0
+
+    for det in detections:
+        et = det["entity_type"]
+        pii_summary[et] = pii_summary.get(et, 0) + 1
+        layer = det.get("layer", "regex")
+        if layer in layer_breakdown:
+            layer_breakdown[layer] += 1
+        else:
+            layer_breakdown[layer] = 1
+        score = det.get("score", 0)
+        if score >= 0.85:
+            high += 1
+        elif score >= 0.60:
+            medium += 1
+
+    return {
+        "pii_summary":          pii_summary,
+        "total_pii":            len(detections),
+        "layer_breakdown":      layer_breakdown,
+        "confidence_breakdown": {"high": high, "medium": medium},
+        "chunk_count":          chunk_count,
+    }

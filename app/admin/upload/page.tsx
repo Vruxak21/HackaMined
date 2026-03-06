@@ -16,22 +16,44 @@ import {
     AlertTriangle,
     Info,
     Layers,
+    Clock,
+    RefreshCw,
+    XCircle,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type MaskingMode = "redact" | "mask" | "tokenize";
 type UploadState = "idle" | "uploading" | "processing" | "done" | "error";
-type ServiceStatus = "checking" | "ready" | "no-indic-bert" | "unavailable";
+type ServiceStatus = "checking" | "ready" | "loading" | "unavailable";
+
+type PipelineConfigData = {
+    use_bert: boolean;
+    use_spacy: boolean;
+    spacy_model: string;
+    skip_bert_reason: string;
+};
+
+type ChunkProgressData = {
+    progress: Record<string, string>;
+    completed: number;
+    total: number;
+    percent: number;
+    chunked: boolean;
+    pipeline_config?: PipelineConfigData;
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const SUPPORTED_FORMATS = ["SQL", "PDF", "DOCX", "CSV", "TXT", "JSON", "PNG", "JPG"];
 const ACCEPT = ".pdf,.docx,.sql,.csv,.txt,.json,.png,.jpg,.jpeg";
-const LARGE_FILE_THRESHOLD_MB = 10;
+const MAX_FILE_SIZE = 52_428_800; // 50 MB
+const MAX_FILE_SIZE_LABEL = "50MB";
+const LARGE_FILE_THRESHOLD_MB = 5;
 
 const MASKING_MODES: {
     id: MaskingMode;
@@ -82,6 +104,74 @@ const PII_TYPES = [
     "Biometric Strings",
 ];
 
+// ── Chunk mini-cards ──────────────────────────────────────────────────────────
+
+const CHUNK_CFG = {
+    pending:    { label: "Pending",    icon: Clock,        cls: "border-gray-200 bg-gray-50 text-gray-400" },
+    processing: { label: "Processing", icon: RefreshCw,    cls: "border-blue-200 bg-blue-50 text-blue-500" },
+    done:       { label: "Done",       icon: CheckCircle2, cls: "border-green-200 bg-green-50 text-green-600" },
+    failed:     { label: "Failed",     icon: XCircle,      cls: "border-red-200 bg-red-50 text-red-500" },
+} as const;
+type ChunkState = keyof typeof CHUNK_CFG;
+function isChunkState(s: string): s is ChunkState { return s in CHUNK_CFG; }
+
+function MiniChunkCard({ index, total, status }: { index: number; total: number; status: string }) {
+    const key = isChunkState(status) ? status : "pending";
+    const { label, icon: Icon, cls } = CHUNK_CFG[key];
+
+    // Smooth fill: 0 → ~90% while processing (decelerating), then snap to 100%
+    const [fillPct, setFillPct] = useState(0);
+    const timerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+    const prevKey   = useRef(key);
+
+    useEffect(() => {
+        if (key === "processing" && prevKey.current !== "processing") {
+            setFillPct(3);
+            timerRef.current = setInterval(() => {
+                setFillPct(p => {
+                    const remaining = 90 - p;
+                    return p + Math.max(0.1, remaining * 0.018); // decelerate toward 90%
+                });
+            }, 300);
+        }
+        if (key === "done" || key === "failed") {
+            if (timerRef.current) clearInterval(timerRef.current);
+            setFillPct(100);
+        }
+        if (key === "pending") {
+            if (timerRef.current) clearInterval(timerRef.current);
+            setFillPct(0);
+        }
+        prevKey.current = key;
+    }, [key]);
+
+    useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
+
+    const barColor = key === "processing" ? "bg-blue-400"
+        : key === "done"    ? "bg-green-500"
+        : key === "failed"  ? "bg-red-400"
+        : "bg-gray-300";
+
+    return (
+        <div className={cn("flex flex-col gap-1.5 rounded-md border p-2 transition-colors duration-300", cls)}>
+            <div className="flex items-center justify-between gap-1">
+                <span className="text-[0.65rem] font-semibold leading-none opacity-70">
+                    Chunk {index + 1}/{total}
+                </span>
+                <Icon size={10} className={cn(key === "processing" && "animate-spin")} />
+            </div>
+            <span className="text-[0.6rem] font-medium">{label}</span>
+            {/* smooth fill bar */}
+            <div className="h-1 w-full overflow-hidden rounded-full bg-black/10">
+                <div
+                    className={cn("h-full rounded-full transition-all duration-300", barColor)}
+                    style={{ width: `${fillPct}%` }}
+                />
+            </div>
+        </div>
+    );
+}
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function ModeCard({
@@ -131,14 +221,20 @@ function ModeCard({
     );
 }
 
-function ProgressBar({ indeterminate = false }: { indeterminate?: boolean }) {
+function ProgressBar({ value }: { value: number }) {
+    const pct = Math.min(100, Math.max(0, value));
     return (
-        <div className="h-1 w-64 overflow-hidden rounded-full bg-muted">
-            {indeterminate ? (
-                <div className="h-full w-1/3 animate-[progressIndeterminate_1.4s_ease-in-out_infinite] rounded-full bg-primary" />
-            ) : (
-                <div className="h-full w-full animate-[progressFill_1.2s_ease-out_forwards] rounded-full bg-primary" />
-            )}
+        <div className="flex w-64 flex-col gap-1.5">
+            <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Progress</span>
+                <span className="tabular-nums font-semibold text-foreground">{Math.round(pct)}%</span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                    className="h-full rounded-full bg-primary"
+                    style={{ width: `${pct}%`, transition: 'width 600ms cubic-bezier(0.4, 0, 0.2, 1)' }}
+                />
+            </div>
         </div>
     );
 }
@@ -167,7 +263,247 @@ function StatusBanner({
         </div>
     );
 }
+// ── Pipeline Mode Badge ──────────────────────────────────────────────────────
 
+function PipelineModeBadge({ config }: { config?: PipelineConfigData }) {
+    if (!config) return null;
+
+    let label: string;
+    let subtitle: string;
+    let cls: string;
+
+    if (config.use_bert) {
+        label = "Full AI Pipeline";
+        subtitle = "Regex + spaCy + BERT — maximum accuracy";
+        cls = "border-teal-200 bg-teal-50 text-teal-700";
+    } else if (config.use_spacy) {
+        label = "Fast Mode";
+        subtitle = "Regex + spaCy — optimized for large files";
+        cls = "border-blue-200 bg-blue-50 text-blue-700";
+    } else {
+        label = "Structured Mode";
+        subtitle = "Regex only — structured data detected";
+        cls = "border-amber-200 bg-amber-50 text-amber-700";
+    }
+
+    return (
+        <div className={cn("mt-1 inline-flex flex-col rounded-md border px-3 py-1.5 text-xs", cls)}>
+            <span className="font-semibold">{label}</span>
+            <span className="opacity-75">{subtitle}</span>
+        </div>
+    );
+}
+
+// ── Time Estimate Helper ─────────────────────────────────────────────────────
+
+function formatTimeRemaining(ms: number): string {
+    const seconds = Math.round(ms / 1000);
+    if (seconds < 60) return `~${seconds} seconds remaining`;
+    const minutes = Math.round(seconds / 60);
+    return `~${minutes} minute${minutes !== 1 ? "s" : ""} remaining`;
+}
+
+// ── Drop Zone Content (top-level to prevent animation resets on re-render) ──
+
+type DropZoneContentProps = {
+    uploadState: UploadState;
+    filename: string;
+    fileSizeMb: number;
+    progress: number;
+    piiCount: number;
+    errorMsg: string;
+    uploadedFileId: string | null;
+    chunkInfo: { total: number; completed: number } | null;
+    chunkProgress: ChunkProgressData | null;
+    pipelineConfig: PipelineConfigData | undefined;
+    processingStartTime: number | null;
+    isLargeFile: boolean;
+    isDragging: boolean;
+    onReset: () => void;
+};
+
+function DropZoneContent({
+    uploadState,
+    filename,
+    fileSizeMb,
+    progress,
+    piiCount,
+    errorMsg,
+    uploadedFileId,
+    chunkInfo,
+    chunkProgress,
+    pipelineConfig,
+    processingStartTime,
+    isLargeFile,
+    isDragging,
+    onReset,
+}: DropZoneContentProps) {
+    if (uploadState === "uploading") {
+        return (
+            <div className="flex flex-col items-center gap-4">
+                <Loader2 size={36} className="animate-spin text-primary" />
+                <p className="text-sm font-medium text-foreground">
+                    Uploading{" "}
+                    <span className="font-semibold">
+                        {filename}
+                        {fileSizeMb > 0 && (
+                            <span className="ml-1 font-normal text-muted-foreground">
+                                ({fileSizeMb.toFixed(1)} MB)
+                            </span>
+                        )}
+                    </span>…
+                </p>
+                <ProgressBar value={progress} />
+            </div>
+        );
+    }
+
+    if (uploadState === "processing") {
+        if (isLargeFile) {
+            const liveTotal = chunkProgress?.total ?? 0;
+            const liveCompleted = chunkProgress?.completed ?? 0;
+            const processingCount = Object.values(chunkProgress?.progress ?? {}).filter(s => s === "processing").length;
+            // Weight: done=100%, processing=50%, pending=0% — gives smooth 0→100 movement
+            const liveProgress = chunkProgress && chunkProgress.total > 0
+                ? Math.round((liveCompleted * 100 + processingCount * 50) / chunkProgress.total)
+                : progress;
+
+            // Time estimate
+            let timeEstimate: string | null = null;
+            if (processingStartTime && liveCompleted > 0 && liveCompleted < liveTotal) {
+                const elapsed = Date.now() - processingStartTime;
+                const rate = liveCompleted / elapsed;
+                const remaining = (liveTotal - liveCompleted) / rate;
+                timeEstimate = formatTimeRemaining(remaining);
+            }
+
+            return (
+                <div className="flex w-full flex-col items-center gap-4">
+                    <Layers size={36} className="animate-pulse text-primary" />
+                    <div className="text-center">
+                        <p className="text-sm font-semibold text-foreground">
+                            Processing large file in parallel chunks…
+                        </p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                            {fileSizeMb.toFixed(1)} MB — splitting into chunks for parallel PII detection
+                        </p>
+                        <PipelineModeBadge config={pipelineConfig} />
+                        {liveTotal > 0 && (
+                            <p className="mt-1 text-xs font-semibold text-primary">
+                                {liveCompleted} of {liveTotal} chunk{liveTotal !== 1 ? "s" : ""} complete
+                            </p>
+                        )}
+                        {timeEstimate && (
+                            <p className="mt-0.5 text-xs text-muted-foreground">{timeEstimate}</p>
+                        )}
+                    </div>
+                    <ProgressBar value={liveProgress} />
+                    {/* Live chunk cards */}
+                    {liveTotal > 0 && (
+                        <div className="grid w-full grid-cols-3 gap-1.5 sm:grid-cols-4 md:grid-cols-5">
+                            {Array.from({ length: liveTotal }, (_, i) => {
+                                const st = chunkProgress?.progress[String(i)] ?? "pending";
+                                return <MiniChunkCard key={i} index={i} total={liveTotal} status={st} />;
+                            })}
+                        </div>
+                    )}
+                    {liveTotal === 0 && (
+                        <p className="text-xs text-muted-foreground animate-pulse">
+                            Splitting file into chunks…
+                        </p>
+                    )}
+                </div>
+            );
+        }
+        return (
+            <div className="flex flex-col items-center gap-4">
+                <Loader2 size={36} className="animate-spin text-primary" />
+                <div className="text-center">
+                    <p className="text-sm font-semibold text-foreground">Scanning for PII…</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">This may take a moment</p>
+                    <PipelineModeBadge config={pipelineConfig} />
+                </div>
+                <ProgressBar value={progress} />
+            </div>
+        );
+    }
+
+    if (uploadState === "done") {
+        return (
+            <div className="flex flex-col items-center gap-4">
+                <CheckCircle2 size={36} className="text-primary" />
+                <div className="text-center">
+                    <p className="text-sm font-bold text-foreground">Sanitization Complete</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                        Found{" "}
+                        <span className="font-semibold text-destructive">
+                            {piiCount} PII instance{piiCount !== 1 ? "s" : ""}
+                        </span>
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">Redirecting to files list…</p>
+                </div>
+                <div className="flex gap-3">
+                    <Button asChild size="sm" className="bg-foreground text-background hover:bg-foreground/90">
+                        <Link href={`/admin/files/${uploadedFileId}`}>View File Details →</Link>
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={onReset}>
+                        Upload Another
+                    </Button>
+                </div>
+            </div>
+        );
+    }
+
+    if (uploadState === "error") {
+        return (
+            <div className="flex flex-col items-center gap-4">
+                <AlertCircle size={36} className="text-destructive" />
+                <div className="text-center">
+                    <p className="text-sm font-bold text-foreground">Upload Failed</p>
+                    <p className="mt-1 text-sm text-muted-foreground">{errorMsg}</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={onReset}>
+                    Try Again
+                </Button>
+            </div>
+        );
+    }
+
+    // idle
+    return (
+        <div className="flex flex-col items-center gap-4">
+            <div
+                className={[
+                    "flex size-14 items-center justify-center rounded-xl border-2 transition-colors",
+                    isDragging ? "border-primary bg-primary/8" : "border-border bg-muted",
+                ].join(" ")}
+            >
+                <Upload
+                    size={24}
+                    className={isDragging ? "text-primary" : "text-muted-foreground"}
+                />
+            </div>
+            <div className="text-center">
+                <p className="text-sm font-semibold text-foreground">Drop your file here</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">or click to browse</p>
+            </div>
+            <div className="flex flex-wrap justify-center gap-1.5">
+                {SUPPORTED_FORMATS.map((fmt) => (
+                    <Badge
+                        key={fmt}
+                        variant="secondary"
+                        className="rounded bg-muted text-[0.6rem] font-semibold uppercase tracking-wide text-muted-foreground hover:bg-muted border-0"
+                    >
+                        {fmt}
+                    </Badge>
+                ))}
+            </div>
+            <p className="text-[0.65rem] text-muted-foreground">
+                Maximum file size: {MAX_FILE_SIZE_LABEL}
+            </p>
+        </div>
+    );
+}
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function AdminUploadPage() {
@@ -183,9 +519,15 @@ export default function AdminUploadPage() {
     const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
     const [uploadWarning, setUploadWarning] = useState<string | null>(null);
     const [chunkInfo, setChunkInfo] = useState<{ total: number; completed: number } | null>(null);
+    const [chunkProgress, setChunkProgress] = useState<ChunkProgressData | null>(null);
+    const [pipelineConfig, setPipelineConfig] = useState<PipelineConfigData | undefined>();
+    const [processingStartTime, setProcessingStartTime] = useState<number | null>(null);
+    const [progress, setProgress] = useState(0);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const redirectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const chunkPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const isLargeFile = fileSizeMb > LARGE_FILE_THRESHOLD_MB;
 
@@ -196,10 +538,10 @@ export default function AdminUploadPage() {
                 const res = await fetch("/api/health");
                 const data = await res.json();
                 if (cancelled) return;
-                if (!data.available || !data.model_loaded) {
+                if (!data.available) {
                     setServiceStatus("unavailable");
-                } else if (data.indic_bert_loaded === false) {
-                    setServiceStatus("no-indic-bert");
+                } else if (data.status === "loading") {
+                    setServiceStatus("loading");
                 } else {
                     setServiceStatus("ready");
                 }
@@ -214,19 +556,25 @@ export default function AdminUploadPage() {
     useEffect(() => () => {
         if (pollRef.current) clearInterval(pollRef.current);
         if (redirectRef.current) clearTimeout(redirectRef.current);
+        if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+        if (chunkPollRef.current) clearInterval(chunkPollRef.current);
     }, []);
 
     const handleFile = useCallback(
         async (file: File) => {
             if (pollRef.current) clearInterval(pollRef.current);
+            if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+            if (chunkPollRef.current) clearInterval(chunkPollRef.current);
             setFilename(file.name);
             setFileSizeMb(file.size / 1024 / 1024);
             setUploadState("uploading");
             setErrorMsg("");
+            setProgress(0);
+            setPipelineConfig(undefined);
+            setProcessingStartTime(null);
 
-            const MAX_FILE_SIZE = 100 * 1024 * 1024;
             if (file.size > MAX_FILE_SIZE) {
-                setErrorMsg(`File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum allowed size is 100 MB.`);
+                setErrorMsg(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum size is ${MAX_FILE_SIZE_LABEL}.`);
                 setUploadState("error");
                 return;
             }
@@ -235,18 +583,67 @@ export default function AdminUploadPage() {
                 const formData = new FormData();
                 formData.append("file", file);
                 formData.append("mode", mode);
-                const res = await fetch("/api/files", { method: "POST", body: formData });
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
+
+                // Use XHR to receive real upload progress events
+                type XHRResult = { ok: boolean; text: string };
+                const { ok, text } = await new Promise<XHRResult>((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.upload.onprogress = (e) => {
+                        if (e.lengthComputable) {
+                            setProgress(Math.round((e.loaded / e.total) * 100));
+                        }
+                    };
+                    xhr.onload = () => resolve({ ok: xhr.status >= 200 && xhr.status < 300, text: xhr.responseText });
+                    xhr.onerror = () => reject(new Error("Network error"));
+                    xhr.open("POST", "/api/files");
+                    xhr.send(formData);
+                });
+
+                if (!ok) {
+                    const err = (() => { try { return JSON.parse(text); } catch { return {}; } })();
                     setErrorMsg((err as { error?: string }).error ?? "Upload failed.");
                     setUploadState("error");
                     return;
                 }
-                const { file: dbFile, warning } = await res.json();
+                const { file: dbFile, warning } = JSON.parse(text) as { file: { id: string }; warning?: string };
                 if (warning) setUploadWarning(warning);
                 setUploadedFileId(dbFile.id);
                 setChunkInfo(null);
+                setChunkProgress(null);
                 setUploadState("processing");
+                setProcessingStartTime(Date.now());
+
+                // If large file: start chunk progress polling
+                if (file.size > LARGE_FILE_THRESHOLD_MB * 1024 * 1024) {
+                    chunkPollRef.current = setInterval(async () => {
+                        try {
+                            const cRes = await fetch(`/api/files/${dbFile.id}/chunks`);
+                            if (cRes.ok) {
+                                const cData = await cRes.json() as ChunkProgressData;
+                                if (cData.chunked && cData.total > 0) {
+                                    setChunkProgress(cData);
+                                }
+                                // Capture pipeline_config if returned
+                                if (cData.pipeline_config) {
+                                    setPipelineConfig(cData.pipeline_config);
+                                }
+                            }
+                        } catch { /* keep polling */ }
+                    }, 1_000);
+                }
+
+                // Smooth easing simulation: ticks every 100ms with a tiny
+                // decelerating step toward 95%. The 600ms CSS transition
+                // bridges consecutive updates so the bar moves continuously.
+                setProgress(0);
+                progressIntervalRef.current = setInterval(() => {
+                    setProgress((prev) => {
+                        if (prev >= 95) return prev;
+                        const remaining = 95 - prev;
+                        return prev + Math.max(0.3, remaining * 0.04);
+                    });
+                }, 100);
+
                 pollRef.current = setInterval(async () => {
                     try {
                         const statusRes = await fetch(`/api/files/${dbFile.id}/status`);
@@ -254,19 +651,37 @@ export default function AdminUploadPage() {
                         const data = await statusRes.json();
                         if (data.status === "DONE") {
                             clearInterval(pollRef.current!);
-                            setPiiCount(data.totalPiiFound ?? 0);
-                            if (data.processingInfo?.chunked_processing) {
-                                setChunkInfo({
-                                    total: data.processingInfo.total_chunks ?? 0,
-                                    completed: data.processingInfo.completed_chunks ?? 0,
-                                });
-                            }
-                            setUploadState("done");
+                            if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+                            if (chunkPollRef.current) clearInterval(chunkPollRef.current);
+                            // Final chunk fetch: file is now DONE so the /chunks endpoint reads
+                            // persisted chunk_statuses from DB and flips all cards to "done".
+                            try {
+                                const cRes = await fetch(`/api/files/${dbFile.id}/chunks`);
+                                if (cRes.ok) {
+                                    const cData = await cRes.json() as ChunkProgressData;
+                                    if (cData.chunked && cData.total > 0) setChunkProgress(cData);
+                                }
+                            } catch { /* non-critical */ }
+                            // Animate bar to 100% first, then reveal the done state
+                            // after the 600ms CSS transition completes.
+                            setProgress(100);
                             redirectRef.current = setTimeout(() => {
-                                router.push(`/admin/files/${dbFile.id}`);
-                            }, 1500);
+                                setPiiCount(data.totalPiiFound ?? 0);
+                                if (data.processingInfo?.chunked_processing) {
+                                    setChunkInfo({
+                                        total: data.processingInfo.total_chunks ?? 0,
+                                        completed: data.processingInfo.completed_chunks ?? 0,
+                                    });
+                                }
+                                setUploadState("done");
+                                redirectRef.current = setTimeout(() => {
+                                    router.push("/admin/files");
+                                }, 2000);
+                            }, 700); // wait for bar transition before showing done
                         } else if (data.status === "FAILED") {
                             clearInterval(pollRef.current!);
+                            if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+                            if (chunkPollRef.current) clearInterval(chunkPollRef.current);
                             setErrorMsg("Processing failed. Please try again.");
                             setUploadState("error");
                         }
@@ -297,159 +712,27 @@ export default function AdminUploadPage() {
     const reset = () => {
         if (pollRef.current) clearInterval(pollRef.current);
         if (redirectRef.current) clearTimeout(redirectRef.current);
+        if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+        if (chunkPollRef.current) clearInterval(chunkPollRef.current);
         setUploadState("idle");
         setFilename("");
         setFileSizeMb(0);
         setPiiCount(0);
         setErrorMsg("");
+        setProgress(0);
         setUploadedFileId(null);
         setChunkInfo(null);
+        setChunkProgress(null);
+        setPipelineConfig(undefined);
+        setProcessingStartTime(null);
         if (fileInputRef.current) fileInputRef.current.value = "";
     };
-
-    function DropZoneContent() {
-        if (uploadState === "uploading") {
-            return (
-                <div className="flex flex-col items-center gap-4">
-                    <Loader2 size={36} className="animate-spin text-primary" />
-                    <p className="text-sm font-medium text-foreground">
-                        Uploading{" "}
-                        <span className="font-semibold">
-                            {filename}
-                            {fileSizeMb > 0 && (
-                                <span className="ml-1 font-normal text-muted-foreground">
-                                    ({fileSizeMb.toFixed(1)} MB)
-                                </span>
-                            )}
-                        </span>…
-                    </p>
-                    <ProgressBar />
-                </div>
-            );
-        }
-
-        if (uploadState === "processing") {
-            if (isLargeFile) {
-                return (
-                    <div className="flex flex-col items-center gap-4">
-                        <Layers size={36} className="animate-pulse text-primary" />
-                        <div className="text-center">
-                            <p className="text-sm font-semibold text-foreground">
-                                Processing large file in parallel chunks…
-                            </p>
-                            <p className="mt-0.5 text-xs text-muted-foreground">
-                                {fileSizeMb.toFixed(1)} MB — splitting into chunks for parallel PII detection
-                            </p>
-                            {chunkInfo && (
-                                <p className="mt-1 text-xs font-semibold text-primary">
-                                    Chunk {chunkInfo.completed} of {chunkInfo.total} complete
-                                </p>
-                            )}
-                        </div>
-                        <ProgressBar indeterminate />
-                    </div>
-                );
-            }
-            return (
-                <div className="flex flex-col items-center gap-4">
-                    <Loader2 size={36} className="animate-spin text-primary" />
-                    <div className="text-center">
-                        <p className="text-sm font-semibold text-foreground">Scanning for PII…</p>
-                        <p className="mt-0.5 text-xs text-muted-foreground">This may take a moment</p>
-                    </div>
-                    <ProgressBar indeterminate />
-                </div>
-            );
-        }
-
-        if (uploadState === "done") {
-            return (
-                <div className="flex flex-col items-center gap-4">
-                    <CheckCircle2 size={36} className="text-primary" />
-                    <div className="text-center">
-                        <p className="text-sm font-bold text-foreground">Sanitization Complete</p>
-                        <p className="mt-1 text-sm text-muted-foreground">
-                            Found{" "}
-                            <span className="font-semibold text-destructive">
-                                {piiCount} PII instance{piiCount !== 1 ? "s" : ""}
-                            </span>
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">Redirecting to file details…</p>
-                    </div>
-                    <div className="flex gap-3">
-                        <Button asChild size="sm" className="bg-foreground text-background hover:bg-foreground/90">
-                            <Link href={`/admin/files/${uploadedFileId}`}>View File Details →</Link>
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={reset}>
-                            Upload Another
-                        </Button>
-                    </div>
-                </div>
-            );
-        }
-
-        if (uploadState === "error") {
-            return (
-                <div className="flex flex-col items-center gap-4">
-                    <AlertCircle size={36} className="text-destructive" />
-                    <div className="text-center">
-                        <p className="text-sm font-bold text-foreground">Upload Failed</p>
-                        <p className="mt-1 text-sm text-muted-foreground">{errorMsg}</p>
-                    </div>
-                    <Button variant="outline" size="sm" onClick={reset}>
-                        Try Again
-                    </Button>
-                </div>
-            );
-        }
-
-        // idle
-        return (
-            <div className="flex flex-col items-center gap-4">
-                <div
-                    className={[
-                        "flex size-14 items-center justify-center rounded-xl border-2 transition-colors",
-                        isDragging ? "border-primary bg-primary/8" : "border-border bg-muted",
-                    ].join(" ")}
-                >
-                    <Upload
-                        size={24}
-                        className={isDragging ? "text-primary" : "text-muted-foreground"}
-                    />
-                </div>
-                <div className="text-center">
-                    <p className="text-sm font-semibold text-foreground">Drop your file here</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">or click to browse</p>
-                </div>
-                <div className="flex flex-wrap justify-center gap-1.5">
-                    {SUPPORTED_FORMATS.map((fmt) => (
-                        <Badge
-                            key={fmt}
-                            variant="secondary"
-                            className="rounded bg-muted text-[0.6rem] font-semibold uppercase tracking-wide text-muted-foreground hover:bg-muted border-0"
-                        >
-                            {fmt}
-                        </Badge>
-                    ))}
-                </div>
-            </div>
-        );
-    }
 
     const isClickable = uploadState === "idle";
 
     return (
         <>
-            <style>{`
-        @keyframes progressFill {
-          from { width: 0% }
-          to   { width: 100% }
-        }
-        @keyframes progressIndeterminate {
-          0%   { transform: translateX(-200%) }
-          100% { transform: translateX(400%) }
-        }
-      `}</style>
+
 
             <div className="min-h-full p-6 lg:p-8">
                 {/* Page header */}
@@ -458,7 +741,7 @@ export default function AdminUploadPage() {
                         Upload File for Sanitization
                     </h1>
                     <p className="mt-0.5 text-sm text-muted-foreground">
-                        Supported formats: SQL, PDF, DOCX, CSV, TXT, JSON, PNG, JPG
+                        Supported formats: SQL, PDF, DOCX, CSV, TXT, JSON, PNG, JPG &middot; Maximum file size: {MAX_FILE_SIZE_LABEL}
                     </p>
                 </div>
 
@@ -476,11 +759,10 @@ export default function AdminUploadPage() {
                         </span>
                     </StatusBanner>
                 )}
-                {serviceStatus === "no-indic-bert" && (
-                    <StatusBanner icon={<Info size={13} />} variant="info">
+                {serviceStatus === "loading" && (
+                    <StatusBanner icon={<Loader2 size={13} className="animate-spin" />} variant="warning">
                         <span>
-                            Running in <strong>spaCy + regex mode</strong> — transformer NER (indic-bert) is not loaded.
-                            All PII types including Aadhaar, PAN, and phone numbers are still detected normally.
+                            <strong>AI models are loading…</strong> Large file uploads will be slower until loading completes.
                         </span>
                     </StatusBanner>
                 )}
@@ -552,7 +834,22 @@ export default function AdminUploadPage() {
                                         onChange={handleInputChange}
                                         tabIndex={-1}
                                     />
-                                    <DropZoneContent />
+                                    <DropZoneContent
+                                        uploadState={uploadState}
+                                        filename={filename}
+                                        fileSizeMb={fileSizeMb}
+                                        progress={progress}
+                                        piiCount={piiCount}
+                                        errorMsg={errorMsg}
+                                        uploadedFileId={uploadedFileId}
+                                        chunkInfo={chunkInfo}
+                                        chunkProgress={chunkProgress}
+                                        pipelineConfig={pipelineConfig}
+                                        processingStartTime={processingStartTime}
+                                        isLargeFile={isLargeFile}
+                                        isDragging={isDragging}
+                                        onReset={reset}
+                                    />
                                 </div>
                             </CardContent>
                         </Card>

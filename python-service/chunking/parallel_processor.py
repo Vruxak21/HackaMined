@@ -68,6 +68,9 @@ class ParallelProcessor:
         ft = chunk_meta.file_type.lower().lstrip(".")
         idx = chunk_meta.chunk_index
 
+        with self.progress_lock:
+            self.progress[idx] = "processing"
+
         try:
             args = (
                 chunk_meta.temp_input_path,
@@ -115,6 +118,7 @@ class ParallelProcessor:
                 pii_summary=result.get("pii_summary", {}),
                 layer_breakdown=result.get("layer_breakdown", {}),
                 strategies_applied=result.get("strategies_applied", {}),
+                confidence_breakdown=result.get("confidence_breakdown", {}),
             )
 
         except Exception as exc:  # noqa: BLE001
@@ -236,6 +240,7 @@ class ParallelProcessor:
             "indic_bert": 0,
         }
         total_strategies: Dict[str, int] = {}
+        total_confidence: Dict[str, int] = {"high": 0, "medium": 0}
         failed_chunks = 0
 
         for result in chunk_results:
@@ -261,12 +266,20 @@ class ParallelProcessor:
                     total_strategies.get(strategy, 0) + count
                 )
 
+            # Merge confidence_breakdown (high / medium counts)
+            for key in ("high", "medium"):
+                total_confidence[key] = (
+                    total_confidence.get(key, 0)
+                    + result.confidence_breakdown.get(key, 0)
+                )
+
         completed = len(chunk_results) - failed_chunks
 
         return {
             "pii_summary": total_pii_summary,
             "layer_breakdown": total_layer_breakdown,
             "strategies_applied": total_strategies,
+            "confidence_breakdown": total_confidence,
             "total_pii": sum(total_pii_summary.values()),
             "failed_chunks": failed_chunks,
             "total_chunks": len(chunk_results),
@@ -283,10 +296,28 @@ class ParallelProcessor:
 
         Returns
         -------
-        dict mapping chunk_index (int) → state str ("pending" | "done" | "failed")
+        dict mapping chunk_index (int) → state str ("pending" | "processing" | "done" | "failed")
         """
         with self.progress_lock:
             return dict(self.progress)
+
+    # ------------------------------------------------------------------
+    # make_progress_cb  (used by in-memory chunked_processor path)
+    # ------------------------------------------------------------------
+
+    def make_progress_cb(self):
+        """
+        Return a thread-safe callback ``(chunk_idx: int, status: str) → None``
+        that writes directly into ``self.progress``.
+
+        Used by the in-memory chunked processing path in
+        ``processing/chunked_processor.py`` so the ``/process-status/{id}``
+        endpoint sees live per-chunk state without any temp files.
+        """
+        def _cb(chunk_idx: int, status: str) -> None:
+            with self.progress_lock:
+                self.progress[chunk_idx] = status
+        return _cb
 
 
 # Module-level singleton — importable directly by the orchestrator layer

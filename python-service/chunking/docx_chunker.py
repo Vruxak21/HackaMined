@@ -42,6 +42,7 @@ import logging
 import math
 import os
 import uuid
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -53,6 +54,8 @@ from chunking.chunk_models import ChunkMetadata, ChunkResult
 from chunking.config import get_chunk_config
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CHUNK_SIZE = 400  # paragraphs per chunk
 
 # Plain-text overlap markers (inserted as paragraph text)
 _MARK_BEFORE_START = "##OVERLAP_BEFORE##"
@@ -130,25 +133,19 @@ class DOCXChunker:
     # split
     # ------------------------------------------------------------------
 
-    def split(self, file_path: str) -> List[ChunkMetadata]:
+    def split(self, file_path: str, chunk_size: int | None = None) -> List[ChunkMetadata]:
         """
         Open *file_path*, collect all body elements (paragraphs + tables)
         in document order, group them into chunks, and write one temp DOCX
         per chunk.
 
-        Each chunk is a complete copy of the original document (so all
-        styles, themes, and section properties are present) with only the
-        relevant body elements kept plus optional overlap context wrapped
-        in marker paragraphs.
-
-        Returns
-        -------
-        list[ChunkMetadata]
-            One entry per chunk (temp files already written).
+        Parameters
+        ----------
+        chunk_size:
+            Paragraphs per chunk. Falls back to DEFAULT_CHUNK_SIZE if None.
         """
-        config = get_chunk_config("docx")
-        paras_per_chunk: int = config["paragraphs_per_chunk"]
-        overlap: int = config["overlap_paragraphs"]
+        paras_per_chunk: int = chunk_size or DEFAULT_CHUNK_SIZE
+        overlap: int = 2  # overlap paragraphs
 
         doc = Document(file_path)
         all_elements = _body_content_elements(doc)
@@ -160,7 +157,7 @@ class DOCXChunker:
 
         total_chunks = math.ceil(total_elements / paras_per_chunk)
         file_id = _get_file_id(file_path)
-        tmp_dir = Path("/tmp")
+        tmp_dir = Path(tempfile.gettempdir())
         chunk_list: List[ChunkMetadata] = []
 
         for chunk_idx in range(total_chunks):
@@ -366,3 +363,194 @@ class DOCXChunker:
                     os.remove(path)
                 except OSError:
                     pass
+
+
+# ── Module-level chunked processing function ──────────────────────────────────
+
+def _noop_progress(chunk_idx: int, status: str) -> None:  # noqa: ARG001
+    pass
+
+
+def _collect_all_paragraphs_with_tables(doc) -> list:
+    """
+    Return every paragraph from body and table cells.
+    Each item is a python-docx Paragraph object.
+    """
+    paras = list(doc.paragraphs)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                paras.extend(cell.paragraphs)
+    for section in doc.sections:
+        for container in (section.header, section.footer):
+            if not container.is_linked_to_previous:
+                paras.extend(container.paragraphs)
+    return paras
+
+
+def _replace_para_text(para, replacement_map: dict[str, str]) -> None:
+    """Apply replacement_map to a paragraph, handling cross-run PII."""
+    if not para.runs:
+        return
+    # Per-run pass (preserves formatting for within-run PII)
+    for run in para.runs:
+        for original, replacement in replacement_map.items():
+            if original in run.text:
+                run.text = run.text.replace(original, replacement)
+    # Cross-run pass (handles PII spanning run boundaries)
+    full = "".join(r.text for r in para.runs)
+    modified = full
+    for original in sorted(replacement_map, key=len, reverse=True):
+        modified = modified.replace(original, replacement_map[original])
+    if modified != full and para.runs:
+        para.runs[0].text = modified
+        for run in para.runs[1:]:
+            run.text = ""
+
+
+def process_docx_chunked(
+    input_path: str,
+    output_path: str,
+    mode: str = "redact",
+    config: dict | None = None,
+    progress_cb=_noop_progress,
+) -> dict:
+    """
+    End-to-end chunked DOCX processing with the new pipeline.
+
+    1. Open DOCX with python-docx, collect all paragraphs + table cells.
+    2. Group paragraphs into chunks of config["chunk_size"].
+    3. Run detect_pii_batch() on chunk texts in parallel.
+    4. Apply masking SEQUENTIALLY (python-docx not thread-safe for writes).
+    5. Save once at the end.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from pathlib import Path
+
+    from detection.masker import pii_masker
+    from pipeline.detector import detect_pii_batch
+
+    if config is None:
+        config = {"use_regex": True, "use_spacy": True, "use_bert": False,
+                  "spacy_model": "en_core_web_sm", "chunk_size": DEFAULT_CHUNK_SIZE,
+                  "workers": 4}
+
+    paras_per_chunk = config.get("chunk_size", DEFAULT_CHUNK_SIZE)
+    workers = config.get("workers", 4)
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    doc = Document(input_path)
+    all_paras = _collect_all_paragraphs_with_tables(doc)
+
+    if not all_paras:
+        doc.save(output_path)
+        return _build_docx_summary([], 0)
+
+    # ── Group paragraphs into chunks ─────────────────────────────────
+    para_groups: list[list] = [
+        all_paras[i : i + paras_per_chunk]
+        for i in range(0, max(1, len(all_paras)), paras_per_chunk)
+    ]
+    total = len(para_groups)
+
+    for i in range(total):
+        progress_cb(i, "pending")
+
+    # ── Extract text per chunk for detection ──────────────────────────
+    chunk_texts: list[str] = []
+    for group in para_groups:
+        chunk_texts.append(
+            "\n".join(" ".join(r.text for r in p.runs) for p in group)
+        )
+
+    # ── Detection: parallel across chunks ─────────────────────────────
+    lock = threading.Lock()
+    det_results: dict[int, tuple[dict[str, str], list[dict]]] = {}
+    all_detections: list[dict] = []
+
+    def _detect_group(idx: int, text: str):
+        progress_cb(idx, "processing")
+        try:
+            dets_list = detect_pii_batch([text], config)
+            dets = dets_list[0]
+
+            repl_map: dict[str, str] = {}
+            for det in dets:
+                val = det["value"]
+                if not val or val in repl_map:
+                    continue
+                if mode == "redact":
+                    repl_map[val] = "[REDACTED]"
+                elif mode == "mask":
+                    repl_map[val] = pii_masker.get_partial_mask(
+                        val, det["entity_type"]
+                    )
+                elif mode == "tokenize":
+                    repl_map[val] = pii_masker.get_token(det["entity_type"])
+                else:
+                    repl_map[val] = "[REDACTED]"
+
+            progress_cb(idx, "done")
+            return idx, repl_map, dets
+        except Exception:
+            progress_cb(idx, "failed")
+            raise
+
+    with ThreadPoolExecutor(max_workers=min(workers, total)) as executor:
+        futures = {
+            executor.submit(_detect_group, i, chunk_texts[i]): i
+            for i in range(total)
+        }
+        for future in as_completed(futures):
+            idx, repl_map, dets = future.result()
+            with lock:
+                det_results[idx] = (repl_map, dets)
+                all_detections.extend(dets)
+
+    # ── Apply masking SEQUENTIALLY (python-docx writes not thread-safe) ──
+    for i, group in enumerate(para_groups):
+        repl_map, _ = det_results.get(i, ({}, []))
+        if repl_map:
+            for para in group:
+                _replace_para_text(para, repl_map)
+
+    # Clean metadata
+    core = doc.core_properties
+    for attr in ("author", "last_modified_by", "comments"):
+        try:
+            setattr(core, attr, "Sanitized")
+        except Exception:
+            pass
+
+    doc.save(output_path)
+    return _build_docx_summary(all_detections, total)
+
+
+def _build_docx_summary(detections: list[dict], chunk_count: int) -> dict:
+    pii_summary: dict[str, int] = {}
+    layer_breakdown: dict[str, int] = {"regex": 0, "spacy": 0, "bert": 0}
+    high = medium = 0
+
+    for det in detections:
+        et = det["entity_type"]
+        pii_summary[et] = pii_summary.get(et, 0) + 1
+        layer = det.get("layer", "regex")
+        if layer in layer_breakdown:
+            layer_breakdown[layer] += 1
+        else:
+            layer_breakdown[layer] = 1
+        score = det.get("score", 0)
+        if score >= 0.85:
+            high += 1
+        elif score >= 0.60:
+            medium += 1
+
+    return {
+        "pii_summary":          pii_summary,
+        "total_pii":            len(detections),
+        "layer_breakdown":      layer_breakdown,
+        "confidence_breakdown": {"high": high, "medium": medium},
+        "chunk_count":          chunk_count,
+    }

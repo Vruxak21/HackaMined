@@ -17,6 +17,7 @@ Security:
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -35,6 +36,9 @@ from detection.analyzer_engine import pii_analyzer          # noqa: E402
 from detection.context_analyzer import context_analyzer     # noqa: E402
 from detection.confidence_scorer import confidence_scorer   # noqa: E402
 from detection.masker import pii_masker                     # noqa: E402
+
+# ── Pipeline model loader (singleton, loads models once at import) ────────────
+from pipeline.model_loader import is_ready, get_model_status  # noqa: E402
 
 # ── Orchestrator (routes all file sizes: direct or chunked) ─────────────────
 from chunking.orchestrator import orchestrator              # noqa: E402
@@ -60,6 +64,11 @@ app = FastAPI(title="PII Detection Service", lifespan=lifespan)
 # Module-level flag set to True once the warmup request completes.
 # The /health endpoint surfaces this so clients can wait for readiness.
 _model_loaded: bool = False
+
+# Per-job results written by background processing threads.
+# Keyed by job_id; value is the final result dict once processing completes.
+_job_results: dict[str, dict[str, Any]] = {}
+_job_lock    = threading.Lock()
 
 
 app.add_middleware(
@@ -91,63 +100,118 @@ class DetectTextRequest(BaseModel):
 @app.get("/health")
 def health() -> dict:
     return {
-        "status": "ok",
+        "status": "ok" if is_ready() else "loading",
         "service": "PII Detection",
         "model_loaded": _model_loaded,
+        "models": get_model_status(),
         "indic_bert_loaded": pii_analyzer.indic_ner is not None,
+        "transformer_ner_loaded": pii_analyzer.indic_ner is not None,
+        "transformer_model": "dslim/bert-base-NER" if pii_analyzer.indic_ner is not None else None,
     }
 
 
 @app.post("/process", dependencies=[Depends(verify_service_signature)])
 def process_file(req: ProcessRequest) -> dict[str, Any]:
     """
-    Sanitise a file.
+    Start file sanitisation in a background thread and return immediately.
 
-    Routes automatically: small files go through a single-pass parser;
-    large files (> 10 MB) are split, processed in parallel, and merged.
+    The caller must poll GET /process-status/{job_id} until finished=true
+    to retrieve the result.  This prevents HTTP timeout for large files.
     """
+    job_id = req.job_id or "default"
     try:
         Path(req.output_path).parent.mkdir(parents=True, exist_ok=True)
-        result = orchestrator.process(
-            file_path=req.file_path,
-            output_path=req.output_path,
-            file_type=req.file_type,
-            override_mode=req.mode,
-            job_id=req.job_id,
-        )
-        return {
-            "success": True,
-            "pii_summary": result.get("pii_summary", {}),
-            "total_pii": result.get("total_pii", 0),
-            "layer_breakdown": result.get("layer_breakdown", {}),
-            "confidence_breakdown": result.get("confidence_breakdown", {}),
-            "processing_info": result.get("processing_info", {}),
-        }
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Clear any stale result and progress from a previous run of this job
+    with _job_lock:
+        _job_results.pop(job_id, None)
+    with parallel_processor.progress_lock:
+        parallel_processor.progress = {}
+
+    def _run() -> None:
+        try:
+            result = orchestrator.process(
+                file_path=req.file_path,
+                output_path=req.output_path,
+                file_type=req.file_type,
+                override_mode=req.mode,
+                job_id=job_id,
+            )
+            with _job_lock:
+                _job_results[job_id] = {
+                    "finished":             True,
+                    "success":              True,
+                    "pii_summary":          result.get("pii_summary", {}),
+                    "total_pii":            result.get("total_pii", 0),
+                    "layer_breakdown":      result.get("layer_breakdown", {}),
+                    "confidence_breakdown": result.get("confidence_breakdown", {}),
+                    "processing_info":      result.get("processing_info", {}),
+                }
+        except Exception as exc:
+            with _job_lock:
+                _job_results[job_id] = {
+                    "finished": True,
+                    "success":  False,
+                    "error":    str(exc),
+                }
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"started": True, "job_id": job_id}
 
 
 @app.get("/process-status/{job_id}")
 def process_status(job_id: str) -> dict[str, Any]:
     """
-    Return the current chunk-processing progress for the active job.
+    Return live chunk progress and, once processing completes, the full result.
 
-    The parallel_processor singleton keeps an in-memory snapshot of each
-    chunk's state (pending / done / failed) which is updated as workers
-    complete.  progress is keyed by chunk_index.
+    While processing:  finished=false, progress dict updated in real-time.
+    When succeeded:    finished=true, success=true + all result fields.
+    When failed:       finished=true, success=false, error message.
     """
     progress = parallel_processor.get_progress()
-    done  = sum(1 for v in progress.values() if v == "done")
-    total = len(progress)
+    done    = sum(1 for v in progress.values() if v == "done")
+    total   = len(progress)
     percent = round(done / total * 100) if total > 0 else 0
+
+    with _job_lock:
+        job_result = _job_results.get(job_id)
+
+    if job_result and job_result.get("finished"):
+        if job_result["success"]:
+            return {
+                "job_id":               job_id,
+                "progress":             progress,
+                "completed":            total,
+                "total":                total,
+                "percent":              100,
+                "finished":             True,
+                "success":              True,
+                "pii_summary":          job_result.get("pii_summary", {}),
+                "total_pii":            job_result.get("total_pii", 0),
+                "layer_breakdown":      job_result.get("layer_breakdown", {}),
+                "confidence_breakdown": job_result.get("confidence_breakdown", {}),
+                "processing_info":      job_result.get("processing_info", {}),
+            }
+        return {
+            "job_id":   job_id,
+            "progress": progress,
+            "completed": done,
+            "total":    total,
+            "percent":  percent,
+            "finished": True,
+            "success":  False,
+            "error":    job_result.get("error", "Processing failed"),
+        }
+
     return {
         "job_id":    job_id,
         "progress":  progress,
         "completed": done,
         "total":     total,
         "percent":   percent,
+        "finished":  False,
     }
 
 

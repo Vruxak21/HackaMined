@@ -23,6 +23,7 @@ class ChunkResult:
     pii_summary: dict
     layer_breakdown: dict
     strategies_applied: dict
+    confidence_breakdown: dict = field(default_factory=dict)
     error: Optional[str] = None
 
 
