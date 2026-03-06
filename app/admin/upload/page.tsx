@@ -9,7 +9,7 @@ import {
     Key,
     Upload,
     Loader2,
-    CheckCircle,
+    CheckCircle2,
     AlertCircle,
     Shield,
     WifiOff,
@@ -38,31 +38,27 @@ const MASKING_MODES: {
     label: string;
     icon: React.ReactNode;
     example: string;
-    exampleColor: string;
     description: string;
 }[] = [
         {
             id: "redact",
             label: "Redact",
-            icon: <EyeOff size={20} />,
+            icon: <EyeOff size={16} />,
             example: "[REDACTED]",
-            exampleColor: "bg-red-50 text-red-700 border border-red-200",
             description: "Complete removal of PII",
         },
         {
             id: "mask",
             label: "Mask",
-            icon: <Eye size={20} />,
+            icon: <Eye size={16} />,
             example: "j***@email.com",
-            exampleColor: "bg-yellow-50 text-yellow-800 border border-yellow-200",
             description: "Partial masking, preserves format",
         },
         {
             id: "tokenize",
             label: "Tokenize",
-            icon: <Key size={20} />,
+            icon: <Key size={16} />,
             example: "<<NAME_001>>",
-            exampleColor: "bg-blue-50 text-blue-700 border border-blue-200",
             description: "Replace with unique tokens",
         },
     ];
@@ -102,31 +98,34 @@ function ModeCard({
             type="button"
             onClick={onClick}
             className={[
-                "flex flex-1 flex-col items-start gap-3 rounded-xl border-2 p-4 text-left transition-all duration-150",
+                "flex flex-1 flex-col gap-3 rounded-lg border-2 p-4 text-left transition-all duration-150",
                 selected
-                    ? "border-blue-500 bg-blue-50 shadow-sm"
-                    : "border-gray-200 bg-white hover:border-blue-300 hover:bg-blue-50/40",
+                    ? "border-primary bg-primary/6"
+                    : "border-border bg-card hover:border-primary/40 hover:bg-primary/3",
             ].join(" ")}
         >
             <div
                 className={[
-                    "flex size-9 items-center justify-center rounded-lg",
-                    selected ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600",
+                    "flex size-8 items-center justify-center rounded-md",
+                    selected ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground",
                 ].join(" ")}
             >
                 {mode.icon}
             </div>
 
             <div className="w-full">
-                <p className={`font-semibold ${selected ? "text-blue-800" : "text-gray-800"}`}>
+                <p className={`text-sm font-semibold ${selected ? "text-foreground" : "text-foreground"}`}>
                     {mode.label}
                 </p>
                 <code
-                    className={`mt-1.5 block w-full rounded px-2 py-1 font-mono text-xs ${mode.exampleColor}`}
+                    className={`mt-1.5 block w-full rounded px-2 py-1 font-mono text-xs border ${selected
+                            ? "bg-primary/8 text-foreground border-primary/20"
+                            : "bg-muted text-muted-foreground border-border"
+                        }`}
                 >
                     {mode.example}
                 </code>
-                <p className="mt-2 text-xs text-gray-500">{mode.description}</p>
+                <p className="mt-2 text-[0.7rem] text-muted-foreground">{mode.description}</p>
             </div>
         </button>
     );
@@ -134,12 +133,37 @@ function ModeCard({
 
 function ProgressBar({ indeterminate = false }: { indeterminate?: boolean }) {
     return (
-        <div className="h-1.5 w-64 overflow-hidden rounded-full bg-gray-200">
+        <div className="h-1 w-64 overflow-hidden rounded-full bg-muted">
             {indeterminate ? (
-                <div className="h-full w-1/3 animate-[progressIndeterminate_1.4s_ease-in-out_infinite] rounded-full bg-purple-500" />
+                <div className="h-full w-1/3 animate-[progressIndeterminate_1.4s_ease-in-out_infinite] rounded-full bg-primary" />
             ) : (
-                <div className="h-full w-full animate-[progressFill_1.2s_ease-out_forwards] rounded-full bg-blue-500" />
+                <div className="h-full w-full animate-[progressFill_1.2s_ease-out_forwards] rounded-full bg-primary" />
             )}
+        </div>
+    );
+}
+
+// ── Status Banner ─────────────────────────────────────────────────────────────
+
+function StatusBanner({
+    icon,
+    variant,
+    children,
+}: {
+    icon: React.ReactNode;
+    variant: "neutral" | "error" | "info" | "warning";
+    children: React.ReactNode;
+}) {
+    const colors = {
+        neutral: "border-border bg-muted text-muted-foreground",
+        error: "border-destructive/20 bg-destructive/6 text-destructive",
+        info: "border-primary/20 bg-primary/6 text-foreground",
+        warning: "border-amber-200 bg-amber-50 text-amber-800",
+    };
+    return (
+        <div className={`mb-5 flex items-start gap-2.5 rounded-lg border px-4 py-3 text-sm ${colors[variant]}`}>
+            <span className="mt-0.5 shrink-0">{icon}</span>
+            <span>{children}</span>
         </div>
     );
 }
@@ -165,7 +189,6 @@ export default function AdminUploadPage() {
 
     const isLargeFile = fileSizeMb > LARGE_FILE_THRESHOLD_MB;
 
-    // ── Service health check ──────────────────────────────────────────────────
     useEffect(() => {
         let cancelled = false;
         async function checkHealth() {
@@ -188,13 +211,10 @@ export default function AdminUploadPage() {
         return () => { cancelled = true; };
     }, []);
 
-    // Cleanup poll and redirect timer on unmount
     useEffect(() => () => {
         if (pollRef.current) clearInterval(pollRef.current);
         if (redirectRef.current) clearTimeout(redirectRef.current);
     }, []);
-
-    // ── Upload flow ───────────────────────────────────────────────────────────
 
     const handleFile = useCallback(
         async (file: File) => {
@@ -204,7 +224,7 @@ export default function AdminUploadPage() {
             setUploadState("uploading");
             setErrorMsg("");
 
-            const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+            const MAX_FILE_SIZE = 100 * 1024 * 1024;
             if (file.size > MAX_FILE_SIZE) {
                 setErrorMsg(`File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum allowed size is 100 MB.`);
                 setUploadState("error");
@@ -222,7 +242,7 @@ export default function AdminUploadPage() {
                     setUploadState("error");
                     return;
                 }
-                        const { file: dbFile, warning } = await res.json();
+                const { file: dbFile, warning } = await res.json();
                 if (warning) setUploadWarning(warning);
                 setUploadedFileId(dbFile.id);
                 setChunkInfo(null);
@@ -265,7 +285,6 @@ export default function AdminUploadPage() {
         if (file) handleFile(file);
     };
 
-    // Drag events
     const onDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); };
     const onDragLeave = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(false); };
     const onDrop = (e: React.DragEvent) => {
@@ -288,19 +307,17 @@ export default function AdminUploadPage() {
         if (fileInputRef.current) fileInputRef.current.value = "";
     };
 
-    // ── Drop zone content ─────────────────────────────────────────────────────
-
     function DropZoneContent() {
         if (uploadState === "uploading") {
             return (
                 <div className="flex flex-col items-center gap-4">
-                    <Loader2 size={44} className="animate-spin text-blue-500" />
-                    <p className="text-sm font-medium text-gray-700">
+                    <Loader2 size={36} className="animate-spin text-primary" />
+                    <p className="text-sm font-medium text-foreground">
                         Uploading{" "}
-                        <span className="font-semibold text-gray-900">
+                        <span className="font-semibold">
                             {filename}
                             {fileSizeMb > 0 && (
-                                <span className="ml-1 font-normal text-gray-500">
+                                <span className="ml-1 font-normal text-muted-foreground">
                                     ({fileSizeMb.toFixed(1)} MB)
                                 </span>
                             )}
@@ -315,16 +332,16 @@ export default function AdminUploadPage() {
             if (isLargeFile) {
                 return (
                     <div className="flex flex-col items-center gap-4">
-                        <Layers size={44} className="animate-pulse text-purple-500" />
+                        <Layers size={36} className="animate-pulse text-primary" />
                         <div className="text-center">
-                            <p className="text-sm font-semibold text-gray-800">
+                            <p className="text-sm font-semibold text-foreground">
                                 Processing large file in parallel chunks…
                             </p>
-                            <p className="mt-0.5 text-xs text-gray-400">
+                            <p className="mt-0.5 text-xs text-muted-foreground">
                                 {fileSizeMb.toFixed(1)} MB — splitting into chunks for parallel PII detection
                             </p>
                             {chunkInfo && (
-                                <p className="mt-1 text-xs font-medium text-purple-600">
+                                <p className="mt-1 text-xs font-semibold text-primary">
                                     Chunk {chunkInfo.completed} of {chunkInfo.total} complete
                                 </p>
                             )}
@@ -335,10 +352,10 @@ export default function AdminUploadPage() {
             }
             return (
                 <div className="flex flex-col items-center gap-4">
-                    <Loader2 size={44} className="animate-spin text-purple-500" />
+                    <Loader2 size={36} className="animate-spin text-primary" />
                     <div className="text-center">
-                        <p className="text-sm font-semibold text-gray-800">Scanning for PII…</p>
-                        <p className="mt-0.5 text-xs text-gray-400">This may take a moment</p>
+                        <p className="text-sm font-semibold text-foreground">Scanning for PII…</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">This may take a moment</p>
                     </div>
                     <ProgressBar indeterminate />
                 </div>
@@ -348,19 +365,19 @@ export default function AdminUploadPage() {
         if (uploadState === "done") {
             return (
                 <div className="flex flex-col items-center gap-4">
-                    <CheckCircle size={44} className="text-green-500" />
+                    <CheckCircle2 size={36} className="text-primary" />
                     <div className="text-center">
-                        <p className="text-base font-bold text-green-700">Sanitization Complete!</p>
-                        <p className="mt-1 text-sm text-gray-500">
+                        <p className="text-sm font-bold text-foreground">Sanitization Complete</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
                             Found{" "}
-                            <span className="font-semibold text-red-600">
+                            <span className="font-semibold text-destructive">
                                 {piiCount} PII instance{piiCount !== 1 ? "s" : ""}
                             </span>
                         </p>
-                        <p className="mt-1 text-xs text-gray-400">Redirecting to file details…</p>
+                        <p className="mt-1 text-xs text-muted-foreground">Redirecting to file details…</p>
                     </div>
                     <div className="flex gap-3">
-                        <Button asChild size="sm" className="bg-blue-600 hover:bg-blue-700 text-white">
+                        <Button asChild size="sm" className="bg-foreground text-background hover:bg-foreground/90">
                             <Link href={`/admin/files/${uploadedFileId}`}>View File Details →</Link>
                         </Button>
                         <Button variant="outline" size="sm" onClick={reset}>
@@ -374,10 +391,10 @@ export default function AdminUploadPage() {
         if (uploadState === "error") {
             return (
                 <div className="flex flex-col items-center gap-4">
-                    <AlertCircle size={44} className="text-red-500" />
+                    <AlertCircle size={36} className="text-destructive" />
                     <div className="text-center">
-                        <p className="text-base font-bold text-red-700">Upload Failed</p>
-                        <p className="mt-1 text-sm text-gray-500">{errorMsg}</p>
+                        <p className="text-sm font-bold text-foreground">Upload Failed</p>
+                        <p className="mt-1 text-sm text-muted-foreground">{errorMsg}</p>
                     </div>
                     <Button variant="outline" size="sm" onClick={reset}>
                         Try Again
@@ -391,25 +408,25 @@ export default function AdminUploadPage() {
             <div className="flex flex-col items-center gap-4">
                 <div
                     className={[
-                        "flex size-16 items-center justify-center rounded-2xl transition-colors",
-                        isDragging ? "bg-blue-100" : "bg-gray-100",
+                        "flex size-14 items-center justify-center rounded-xl border-2 transition-colors",
+                        isDragging ? "border-primary bg-primary/8" : "border-border bg-muted",
                     ].join(" ")}
                 >
                     <Upload
-                        size={28}
-                        className={isDragging ? "text-blue-600" : "text-gray-400"}
+                        size={24}
+                        className={isDragging ? "text-primary" : "text-muted-foreground"}
                     />
                 </div>
                 <div className="text-center">
-                    <p className="text-sm font-semibold text-gray-800">Drop your file here</p>
-                    <p className="mt-0.5 text-xs text-gray-400">or click to browse</p>
+                    <p className="text-sm font-semibold text-foreground">Drop your file here</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">or click to browse</p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-1.5">
                     {SUPPORTED_FORMATS.map((fmt) => (
                         <Badge
                             key={fmt}
                             variant="secondary"
-                            className="rounded bg-gray-100 text-[10px] font-medium uppercase tracking-wide text-gray-500 hover:bg-gray-100"
+                            className="rounded bg-muted text-[0.6rem] font-semibold uppercase tracking-wide text-muted-foreground hover:bg-muted border-0"
                         >
                             {fmt}
                         </Badge>
@@ -423,7 +440,6 @@ export default function AdminUploadPage() {
 
     return (
         <>
-            {/* Keyframe styles injected inline for progress animations */}
             <style>{`
         @keyframes progressFill {
           from { width: 0% }
@@ -438,53 +454,49 @@ export default function AdminUploadPage() {
             <div className="min-h-full p-6 lg:p-8">
                 {/* Page header */}
                 <div className="mb-8">
-                    <h1 className="text-2xl font-bold text-gray-900">
+                    <h1 className="text-xl font-bold text-foreground tracking-tight">
                         Upload File for Sanitization
                     </h1>
-                    <p className="mt-0.5 text-sm text-gray-500">
+                    <p className="mt-0.5 text-sm text-muted-foreground">
                         Supported formats: SQL, PDF, DOCX, CSV, TXT, JSON, PNG, JPG
                     </p>
                 </div>
 
                 {/* Service status banners */}
                 {serviceStatus === "checking" && (
-                    <div className="mb-5 flex items-center gap-2.5 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
-                        <Loader2 size={15} className="animate-spin shrink-0" />
+                    <StatusBanner icon={<Loader2 size={13} className="animate-spin" />} variant="neutral">
                         Checking PII detection service…
-                    </div>
+                    </StatusBanner>
                 )}
                 {serviceStatus === "unavailable" && (
-                    <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-                        <WifiOff size={15} className="mt-0.5 shrink-0" />
+                    <StatusBanner icon={<WifiOff size={13} />} variant="error">
                         <span>
                             <strong>Python service is not running.</strong> Uploads will fail until the service is started.
-                            Run: <code className="rounded bg-red-100 px-1 py-0.5 text-xs">python -m uvicorn main:app --host 0.0.0.0 --port 8000</code> in the <code className="rounded bg-red-100 px-1 py-0.5 text-xs">python-service/</code> directory.
+                            Run: <code className="rounded bg-destructive/10 px-1 py-0.5 text-xs">python -m uvicorn main:app --host 0.0.0.0 --port 8000</code> in the <code className="rounded bg-destructive/10 px-1 py-0.5 text-xs">python-service/</code> directory.
                         </span>
-                    </div>
+                    </StatusBanner>
                 )}
                 {serviceStatus === "no-indic-bert" && (
-                    <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
-                        <Info size={15} className="mt-0.5 shrink-0" />
+                    <StatusBanner icon={<Info size={13} />} variant="info">
                         <span>
                             Running in <strong>spaCy + regex mode</strong> — transformer NER (indic-bert) is not loaded.
                             All PII types including Aadhaar, PAN, and phone numbers are still detected normally.
                         </span>
-                    </div>
+                    </StatusBanner>
                 )}
                 {uploadWarning && (
-                    <div className="mb-5 flex items-start gap-2.5 rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800">
-                        <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                    <StatusBanner icon={<AlertTriangle size={13} />} variant="warning">
                         {uploadWarning}
-                    </div>
+                    </StatusBanner>
                 )}
 
                 <div className="grid gap-6 lg:grid-cols-3">
-                    {/* Left column — mode + drop zone */}
+                    {/* Left column */}
                     <div className="flex flex-col gap-6 lg:col-span-2">
-                        {/* Masking Mode card */}
-                        <Card className="border border-gray-100 shadow-sm">
+                        {/* Masking Mode */}
+                        <Card className="border border-border shadow-none">
                             <CardHeader className="pb-4">
-                                <CardTitle className="text-base font-semibold text-gray-900">
+                                <CardTitle className="text-sm font-semibold text-foreground">
                                     Select Masking Mode
                                 </CardTitle>
                             </CardHeader>
@@ -502,10 +514,10 @@ export default function AdminUploadPage() {
                             </CardContent>
                         </Card>
 
-                        {/* Drop zone card */}
-                        <Card className="border border-gray-100 shadow-sm">
+                        {/* Drop zone */}
+                        <Card className="border border-border shadow-none">
                             <CardHeader className="pb-4">
-                                <CardTitle className="text-base font-semibold text-gray-900">
+                                <CardTitle className="text-sm font-semibold text-foreground">
                                     Upload File
                                 </CardTitle>
                             </CardHeader>
@@ -524,12 +536,12 @@ export default function AdminUploadPage() {
                                     onDragLeave={isClickable ? onDragLeave : undefined}
                                     onDrop={isClickable ? onDrop : undefined}
                                     className={[
-                                        "flex min-h-56 flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-10 transition-all duration-200",
+                                        "flex min-h-52 flex-col items-center justify-center rounded-lg border-2 border-dashed px-6 py-10 transition-all duration-200",
                                         isClickable
                                             ? isDragging
-                                                ? "border-blue-400 bg-blue-50 cursor-copy"
-                                                : "border-gray-300 bg-gray-50 hover:border-blue-400 hover:bg-blue-50/40 cursor-pointer"
-                                            : "border-gray-200 bg-gray-50 cursor-default",
+                                                ? "border-primary bg-primary/6 cursor-copy"
+                                                : "border-border bg-muted/30 hover:border-primary/50 hover:bg-primary/3 cursor-pointer"
+                                            : "border-border bg-muted/30 cursor-default",
                                     ].join(" ")}
                                 >
                                     <input
@@ -546,28 +558,28 @@ export default function AdminUploadPage() {
                         </Card>
                     </div>
 
-                    {/* Right column — guidelines */}
+                    {/* Right column — PII types */}
                     <div>
-                        <Card className="border border-gray-100 shadow-sm">
+                        <Card className="border border-border shadow-none">
                             <CardHeader className="pb-4">
-                                <CardTitle className="flex items-center gap-2 text-base font-semibold text-gray-900">
-                                    <Shield size={16} className="text-blue-600" />
+                                <CardTitle className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                                    <Shield size={14} className="text-primary" />
                                     PII Types Detected
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
                                 <ul className="space-y-2">
                                     {PII_TYPES.map((type) => (
-                                        <li key={type} className="flex items-center gap-2 text-sm text-gray-600">
-                                            <span className="size-1.5 shrink-0 rounded-full bg-blue-500" />
+                                        <li key={type} className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                                            <span className="size-1.5 shrink-0 rounded-full bg-primary" />
                                             {type}
                                         </li>
                                     ))}
                                 </ul>
 
-                                <div className="mt-6 rounded-lg bg-amber-50 border border-amber-200 p-3">
-                                    <p className="text-xs font-semibold text-amber-800">Context-Aware Detection</p>
-                                    <p className="mt-1 text-xs text-amber-700">
+                                <div className="mt-6 rounded-lg border border-border bg-muted/50 p-3">
+                                    <p className="text-xs font-semibold text-foreground">Context-Aware Detection</p>
+                                    <p className="mt-1 text-xs text-muted-foreground">
                                         Numbers are only flagged as PII when linked to an identity (e.g., name + Aadhaar
                                         within the same context window).
                                     </p>

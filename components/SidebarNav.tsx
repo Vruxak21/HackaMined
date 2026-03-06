@@ -18,7 +18,7 @@ export function SidebarNav({ navItems }: SidebarNavProps) {
   const pathname = usePathname();
 
   return (
-    <nav className="flex flex-col gap-1">
+    <nav className="flex flex-col gap-0.5">
       {navItems.map(({ href, label, icon: Icon }) => {
         const isActive = pathname.startsWith(href);
         return (
@@ -26,16 +26,28 @@ export function SidebarNav({ navItems }: SidebarNavProps) {
             key={href}
             href={href}
             className={[
-              "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all duration-150",
-              // left border always present to avoid layout shift; color changes on active
-              "border-l-2",
+              "group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-all duration-150",
+              "relative overflow-hidden",
               isActive
-                ? "border-blue-500 bg-blue-50 text-blue-700"
-                : "border-transparent text-gray-500 hover:bg-blue-50/60 hover:text-blue-600",
+                ? "bg-primary/10 text-foreground"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
             ].join(" ")}
             aria-current={isActive ? "page" : undefined}
           >
-            <Icon size={16} className="shrink-0" />
+            {/* Amber left accent bar */}
+            <span
+              className={[
+                "absolute left-0 top-1/2 -translate-y-1/2 w-0.5 rounded-full transition-all duration-200",
+                isActive ? "h-4 bg-primary opacity-100" : "h-0 opacity-0",
+              ].join(" ")}
+            />
+            <Icon
+              size={15}
+              className={[
+                "shrink-0 transition-colors",
+                isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground",
+              ].join(" ")}
+            />
             <span>{label}</span>
           </Link>
         );

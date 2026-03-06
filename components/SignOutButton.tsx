@@ -26,7 +26,7 @@ export function SignOutButton({ className }: SignOutButtonProps) {
       disabled={loading}
       className={
         className ??
-        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-gray-500 transition-colors hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+        "flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-destructive/8 hover:text-destructive disabled:opacity-50"
       }
     >
       <LogOut size={14} className="shrink-0" />

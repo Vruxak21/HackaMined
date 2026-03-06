@@ -44,57 +44,53 @@ export default async function AdminUsersPage() {
   }));
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex flex-col gap-6 p-6 lg:p-8">
       {/* Header */}
       <div className="flex items-center gap-3">
-        <h1 className="text-xl font-bold text-gray-900">Users</h1>
-        <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-semibold text-gray-600">
+        <h1 className="text-xl font-bold text-foreground tracking-tight">Users</h1>
+        <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-semibold text-muted-foreground">
           {users.length} total
         </span>
       </div>
 
       {/* Table */}
-      <div className="overflow-x-auto rounded-lg border border-gray-200">
+      <div className="overflow-x-auto rounded-lg border border-border">
         <Table>
           <TableHeader>
-            <TableRow className="bg-gray-50">
-              <TableHead>User</TableHead>
-              <TableHead>Role</TableHead>
-              <TableHead>Joined</TableHead>
-              <TableHead>Files Uploaded</TableHead>
+            <TableRow className="border-border hover:bg-transparent">
+              <TableHead className="text-[0.65rem] font-semibold uppercase tracking-widest text-muted-foreground">User</TableHead>
+              <TableHead className="text-[0.65rem] font-semibold uppercase tracking-widest text-muted-foreground">Role</TableHead>
+              <TableHead className="text-[0.65rem] font-semibold uppercase tracking-widest text-muted-foreground">Joined</TableHead>
+              <TableHead className="text-[0.65rem] font-semibold uppercase tracking-widest text-muted-foreground">Files Uploaded</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {users.map((user) => (
-              <TableRow key={user.id} className="hover:bg-gray-50/50">
-                {/* User */}
+              <TableRow key={user.id} className="border-border hover:bg-muted/40 transition-colors">
                 <TableCell>
                   <div className="flex items-center gap-3">
-                    <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-sm font-bold text-indigo-700">
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/12 text-xs font-bold text-primary">
                       {user.name[0].toUpperCase()}
                     </div>
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-gray-800">{user.name}</p>
-                      <p className="truncate text-xs text-gray-400">{user.email}</p>
+                      <p className="truncate text-sm font-medium text-foreground">{user.name}</p>
+                      <p className="truncate text-xs text-muted-foreground">{user.email}</p>
                     </div>
                   </div>
                 </TableCell>
-                {/* Role */}
                 <TableCell>
                   <span
                     className={
                       user.role === "ADMIN"
-                        ? "rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-semibold text-blue-700"
-                        : "rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-semibold text-gray-600"
+                        ? "rounded-full bg-primary/12 px-2.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-primary"
+                        : "rounded-full bg-muted px-2.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-muted-foreground"
                     }
                   >
                     {user.role}
                   </span>
                 </TableCell>
-                {/* Joined */}
-                <TableCell className="text-sm text-gray-500">{formatDate(user.joinedAt)}</TableCell>
-                {/* Files */}
-                <TableCell className="text-sm font-medium text-gray-700">{user.filesUploaded}</TableCell>
+                <TableCell className="text-sm text-muted-foreground">{formatDate(user.joinedAt)}</TableCell>
+                <TableCell className="text-sm font-medium text-foreground tabular-nums">{user.filesUploaded}</TableCell>
               </TableRow>
             ))}
           </TableBody>

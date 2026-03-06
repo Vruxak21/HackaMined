@@ -9,10 +9,8 @@ export default async function UserLayout({
 }: {
   children: React.ReactNode;
 }) {
-  // Guard — redirects to "/" if not authenticated
   const user = await requireAuth();
 
-  // Admins should not use the user portal
   if (user.role === "ADMIN") {
     redirect("/admin/dashboard");
   }
@@ -21,36 +19,30 @@ export default async function UserLayout({
   const email = session?.user?.email ?? "";
 
   return (
-    <div className="flex min-h-screen flex-col bg-gray-50">
-      {/* ── Top navbar ───────────────────────────────────────────────────────── */}
-      <header className="relative flex h-14 items-center justify-between border-b border-gray-200 bg-white px-6 shadow-sm">
+    <div className="flex min-h-screen flex-col bg-background">
+      {/* ── Top navbar ─────────────────────────────────────────────── */}
+      <header className="flex h-13 items-center justify-between border-b border-border bg-card px-6">
         {/* Left: brand */}
-        <div className="flex items-center gap-2">
-          <div className="flex size-7 items-center justify-center rounded-lg bg-indigo-600 shadow-sm">
-            <Shield size={14} className="text-white" />
+        <div className="flex items-center gap-2.5">
+          <div className="flex size-6 items-center justify-center rounded-md bg-foreground">
+            <Shield size={12} className="text-background" />
           </div>
-          <span className="text-sm font-bold tracking-tight text-gray-900">PII Sanitizer</span>
+          <span className="text-xs font-bold tracking-tight text-foreground">PII Sanitizer</span>
         </div>
 
-        {/* Center: section title */}
-        <span className="absolute left-1/2 -translate-x-1/2 text-sm font-semibold text-gray-600">
-          Sanitized Files
-        </span>
-
         {/* Right: email + sign out */}
-        <div className="flex items-center gap-3">
-          <span className="max-w-45 truncate text-xs text-gray-500" title={email}>
+        <div className="flex items-center gap-4">
+          <span className="max-w-48 truncate text-xs text-muted-foreground" title={email}>
             {email}
           </span>
           <SignOutButton
-            className="flex items-center gap-1.5 rounded-md border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+            className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-destructive/30 hover:bg-destructive/6 hover:text-destructive"
           />
         </div>
       </header>
 
-      {/* ── Main content ─────────────────────────────────────────────────────── */}
+      {/* ── Main content ───────────────────────────────────────────── */}
       <main className="flex-1">{children}</main>
     </div>
   );
 }
-

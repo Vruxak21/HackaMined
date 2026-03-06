@@ -4,87 +4,65 @@ import { AdminNav } from "@/components/AdminNav";
 import { SignOutButton } from "@/components/SignOutButton";
 import { Shield, ShieldCheck } from "lucide-react";
 
-// ── Layout ────────────────────────────────────────────────────────────────────
-
 export default async function AdminLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  // Guard — redirects to "/" if not admin
   await requireAdmin();
 
-  // Grab email for display (session already validated above)
   const session = await getSession();
   const email = session?.user?.email ?? "admin";
-  const avatarLetter = email[0].toUpperCase();
+  const name = session?.user?.name ?? email;
+  const avatarLetter = (name[0] ?? email[0]).toUpperCase();
 
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-50">
-      {/* ── Sidebar ────────────────────────────────────────────────────────── */}
-      <aside className="flex h-full w-64 shrink-0 flex-col border-r border-gray-200 bg-white">
+    <div className="flex h-screen overflow-hidden bg-background">
+      {/* ── Sidebar ──────────────────────────────────────────────────── */}
+      <aside className="flex h-full w-56 shrink-0 flex-col border-r border-border bg-card">
 
-        {/* Brand */}
-        <div className="flex items-center gap-2.5 px-4 py-5">
-          <div className="flex size-8 items-center justify-center rounded-lg bg-blue-600 shadow-sm">
-            <Shield size={16} className="text-white" />
+        {/* Brand lockup */}
+        <div className="flex items-center gap-2.5 px-4 py-4 border-b border-border">
+          <div className="flex size-7 items-center justify-center rounded-md bg-foreground">
+            <Shield size={13} className="text-background" />
           </div>
-          <span className="text-sm font-bold tracking-tight text-gray-900">
-            PII Sanitizer
-          </span>
+          <div>
+            <p className="text-xs font-bold tracking-tight text-foreground leading-none">PII Sanitizer</p>
+            <p className="text-[0.6rem] uppercase tracking-widest text-muted-foreground mt-0.5 font-semibold">Admin</p>
+          </div>
         </div>
 
-        {/* Thin separator */}
-        <div className="mx-4 border-t border-gray-100" />
-
-        {/* Section label */}
-        <p className="mt-4 px-4 text-[10px] font-semibold uppercase tracking-widest text-gray-400">
-          Admin Panel
-        </p>
-
         {/* Navigation */}
-        <div className="mt-2 flex-1 overflow-y-auto px-2">
+        <div className="flex-1 overflow-y-auto px-2 py-4">
           <AdminNav />
         </div>
 
         {/* Security badge */}
         <div className="mx-2 mb-2">
-          <div className="flex items-center gap-1.5 rounded-md bg-green-50 px-2.5 py-1.5">
-            <ShieldCheck size={12} className="shrink-0 text-green-600" />
-            <span className="text-[11px] font-medium text-green-700">AES-256-GCM Encrypted</span>
+          <div className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5">
+            <ShieldCheck size={11} className="shrink-0 text-primary" />
+            <span className="text-[0.6rem] font-semibold uppercase tracking-wider text-muted-foreground">AES-256-GCM</span>
           </div>
         </div>
 
-        {/* Bottom user area */}
-        <div className="border-t border-gray-100 px-2 py-3">
-          {/* User info row */}
-          <div className="mb-1 flex items-center gap-2.5 rounded-md px-2 py-2">
-            {/* Avatar */}
-            <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-700">
+        {/* User area */}
+        <div className="border-t border-border px-2 py-3 space-y-1">
+          <div className="flex items-center gap-2.5 px-2 py-1.5 rounded-md">
+            <div className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[0.6rem] font-bold text-primary">
               {avatarLetter}
             </div>
-
-            {/* Email + badge */}
             <div className="min-w-0 flex-1">
-              <p
-                className="truncate text-xs font-medium text-gray-700"
-                title={email}
-              >
+              <p className="truncate text-xs font-medium text-foreground" title={email}>
                 {email}
               </p>
-              <span className="mt-0.5 inline-block rounded bg-blue-100 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-blue-700">
-                Admin
-              </span>
             </div>
           </div>
-
-          {/* Sign out */}
           <SignOutButton />
         </div>
       </aside>
 
-      {/* ── Main content ──────────────────────────────────────────────────────── */}
-      <main className="flex-1 overflow-y-auto bg-white">
+      {/* ── Main content ─────────────────────────────────────────────── */}
+      <main className="flex-1 overflow-y-auto bg-background">
         {children}
       </main>
     </div>

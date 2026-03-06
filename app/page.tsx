@@ -14,19 +14,12 @@ import {
   User,
   Loader2,
   Chrome,
-  Sparkles,
+  Shield,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { signIn, signUp, useSession } from "@/lib/auth-client";
@@ -53,7 +46,31 @@ const signUpSchema = z
 type SignInValues = z.infer<typeof signInSchema>;
 type SignUpValues = z.infer<typeof signUpSchema>;
 
-// ── Shared Password Input ─────────────────────────────────────────────────────
+// ── Field wrapper ─────────────────────────────────────────────────────────────
+
+function Field({
+  label,
+  error,
+  children,
+}: {
+  label: string;
+  error?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <Label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+        {label}
+      </Label>
+      {children}
+      {error && (
+        <p className="text-[0.75rem] text-destructive leading-tight">{error}</p>
+      )}
+    </div>
+  );
+}
+
+// ── Password Input ─────────────────────────────────────────────────────────────
 
 function PasswordInput({
   id,
@@ -63,21 +80,21 @@ function PasswordInput({
   const [show, setShow] = useState(false);
   return (
     <div className="relative">
-      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
       <Input
         id={id}
         type={show ? "text" : "password"}
         placeholder={placeholder}
-        className="pl-9 pr-9"
+        className="pl-9 pr-9 h-10 border-border/70 bg-background focus:border-primary"
         {...rest}
       />
       <button
         type="button"
         onClick={() => setShow((v) => !v)}
-        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
         aria-label={show ? "Hide password" : "Show password"}
       >
-        {show ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+        {show ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
       </button>
     </div>
   );
@@ -126,48 +143,43 @@ function SignInForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-      {/* Email */}
-      <div className="space-y-1.5">
-        <Label htmlFor="signin-email">Email</Label>
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+      <Field label="Email" error={errors.email?.message}>
         <div className="relative">
-          <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+          <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
           <Input
             id="signin-email"
             type="email"
             placeholder="you@example.com"
-            className="pl-9"
+            className="pl-9 h-10 border-border/70 bg-background focus:border-primary"
             {...register("email")}
           />
         </div>
-        {errors.email && (
-          <p className="text-[0.8rem] text-destructive">{errors.email.message}</p>
-        )}
-      </div>
+      </Field>
 
-      {/* Password */}
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between">
-          <Label htmlFor="signin-password">Password</Label>
-          <button
-            type="button"
-            className="text-xs text-muted-foreground hover:text-primary transition-colors"
-          >
-            Forgot password?
-          </button>
+      <Field label="Password" error={errors.password?.message}>
+        <div className="space-y-1">
+          <PasswordInput
+            id="signin-password"
+            placeholder="••••••••"
+            {...register("password")}
+          />
+          <div className="flex justify-end">
+            <button
+              type="button"
+              className="text-[0.7rem] text-muted-foreground hover:text-foreground"
+            >
+              Forgot password?
+            </button>
+          </div>
         </div>
-        <PasswordInput
-          id="signin-password"
-          placeholder="••••••••"
-          {...register("password")}
-        />
-        {errors.password && (
-          <p className="text-[0.8rem] text-destructive">{errors.password.message}</p>
-        )}
-      </div>
+      </Field>
 
-      {/* Submit */}
-      <Button type="submit" className="w-full" disabled={loading}>
+      <Button
+        type="submit"
+        className="w-full h-10 bg-primary text-primary-foreground hover:bg-primary/90 font-semibold tracking-wide"
+        disabled={loading}
+      >
         {loading ? (
           <>
             <Loader2 className="size-4 animate-spin" />
@@ -178,18 +190,16 @@ function SignInForm() {
         )}
       </Button>
 
-      {/* Divider */}
       <div className="flex items-center gap-3">
         <Separator className="flex-1" />
-        <span className="text-xs text-muted-foreground">or</span>
+        <span className="text-[0.7rem] uppercase tracking-widest text-muted-foreground">or</span>
         <Separator className="flex-1" />
       </div>
 
-      {/* Google */}
       <Button
         type="button"
         variant="outline"
-        className="w-full gap-2"
+        className="w-full h-10 gap-2 border-border/70"
         onClick={handleGoogle}
         disabled={googleLoading}
       >
@@ -248,73 +258,54 @@ function SignUpForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-      {/* Name */}
-      <div className="space-y-1.5">
-        <Label htmlFor="signup-name">Full Name</Label>
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+      <Field label="Full Name" error={errors.name?.message}>
         <div className="relative">
-          <User className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+          <User className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
           <Input
             id="signup-name"
             type="text"
             placeholder="Jane Doe"
-            className="pl-9"
+            className="pl-9 h-10 border-border/70 bg-background focus:border-primary"
             {...register("name")}
           />
         </div>
-        {errors.name && (
-          <p className="text-[0.8rem] text-destructive">{errors.name.message}</p>
-        )}
-      </div>
+      </Field>
 
-      {/* Email */}
-      <div className="space-y-1.5">
-        <Label htmlFor="signup-email">Email</Label>
+      <Field label="Email" error={errors.email?.message}>
         <div className="relative">
-          <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+          <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
           <Input
             id="signup-email"
             type="email"
             placeholder="you@example.com"
-            className="pl-9"
+            className="pl-9 h-10 border-border/70 bg-background focus:border-primary"
             {...register("email")}
           />
         </div>
-        {errors.email && (
-          <p className="text-[0.8rem] text-destructive">{errors.email.message}</p>
-        )}
-      </div>
+      </Field>
 
-      {/* Password */}
-      <div className="space-y-1.5">
-        <Label htmlFor="signup-password">Password</Label>
+      <Field label="Password" error={errors.password?.message}>
         <PasswordInput
           id="signup-password"
           placeholder="Min. 8 characters"
           {...register("password")}
         />
-        {errors.password && (
-          <p className="text-[0.8rem] text-destructive">{errors.password.message}</p>
-        )}
-      </div>
+      </Field>
 
-      {/* Confirm Password */}
-      <div className="space-y-1.5">
-        <Label htmlFor="signup-confirm">Confirm Password</Label>
+      <Field label="Confirm Password" error={errors.confirmPassword?.message}>
         <PasswordInput
           id="signup-confirm"
           placeholder="Repeat your password"
           {...register("confirmPassword")}
         />
-        {errors.confirmPassword && (
-          <p className="text-[0.8rem] text-destructive">
-            {errors.confirmPassword.message}
-          </p>
-        )}
-      </div>
+      </Field>
 
-      {/* Submit */}
-      <Button type="submit" className="w-full" disabled={loading}>
+      <Button
+        type="submit"
+        className="w-full h-10 bg-primary text-primary-foreground hover:bg-primary/90 font-semibold tracking-wide"
+        disabled={loading}
+      >
         {loading ? (
           <>
             <Loader2 className="size-4 animate-spin" />
@@ -325,18 +316,16 @@ function SignUpForm() {
         )}
       </Button>
 
-      {/* Divider */}
       <div className="flex items-center gap-3">
         <Separator className="flex-1" />
-        <span className="text-xs text-muted-foreground">or</span>
+        <span className="text-[0.7rem] uppercase tracking-widest text-muted-foreground">or</span>
         <Separator className="flex-1" />
       </div>
 
-      {/* Google */}
       <Button
         type="button"
         variant="outline"
-        className="w-full gap-2"
+        className="w-full h-10 gap-2 border-border/70"
         onClick={handleGoogle}
         disabled={googleLoading}
       >
@@ -348,13 +337,13 @@ function SignUpForm() {
         Continue with Google
       </Button>
 
-      <p className="text-center text-xs text-muted-foreground">
+      <p className="text-center text-[0.7rem] text-muted-foreground">
         By creating an account you agree to our{" "}
-        <span className="underline underline-offset-2 cursor-pointer hover:text-foreground transition-colors">
+        <span className="underline underline-offset-2 cursor-pointer hover:text-foreground">
           Terms of Service
         </span>{" "}
-        &amp;{" "}
-        <span className="underline underline-offset-2 cursor-pointer hover:text-foreground transition-colors">
+        &{" "}
+        <span className="underline underline-offset-2 cursor-pointer hover:text-foreground">
           Privacy Policy
         </span>
         .
@@ -376,69 +365,97 @@ export default function Home() {
   }, [session, isPending, router]);
 
   if (!isPending && session?.user) {
-    // Render nothing while the redirect fires
     return null;
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-linear-to-br from-background via-muted/30 to-background p-4">
-      {/* Decorative blobs */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="absolute -top-40 -right-40 size-96 rounded-full bg-primary/8 blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 size-96 rounded-full bg-primary/8 blur-3xl" />
-      </div>
-
-      <div className="relative w-full max-w-md">
-        {/* Brand header */}
-        <div className="mb-8 flex flex-col items-center gap-3 text-center">
-          <div className="flex size-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-lg ring-4 ring-primary/20">
-            <Sparkles className="size-6" />
+    <div className="min-h-screen grid lg:grid-cols-2">
+      {/* ── Left panel — branding ─────────────────────────────── */}
+      <div className="hidden lg:flex flex-col justify-between bg-foreground text-background p-12">
+        {/* Top: wordmark */}
+        <div className="flex items-center gap-2.5">
+          <div className="flex size-8 items-center justify-center rounded-lg bg-primary">
+            <Shield size={15} className="text-foreground" />
           </div>
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">Hackamined&apos;26</h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Sign in or create an account to continue
+          <span className="text-sm font-bold tracking-tight">PII Sanitizer</span>
+        </div>
+
+        {/* Middle: hero copy */}
+        <div className="space-y-6">
+          <div className="space-y-3">
+            <p className="text-[0.65rem] uppercase tracking-[0.2em] text-background/40 font-semibold">
+              HackaMined &apos;26
             </p>
+            <h1 className="text-4xl font-bold leading-[1.15] tracking-tight">
+              Protect what<br />matters most.
+            </h1>
+            <p className="text-sm text-background/50 leading-relaxed max-w-xs">
+              Automatically detect and sanitize personally identifiable information from your documents — securely and at scale.
+            </p>
+          </div>
+
+          {/* Feature pills */}
+          <div className="flex flex-wrap gap-2">
+            {["AES-256-GCM", "16 PII types", "PDF · SQL · CSV · JSON"].map((f) => (
+              <span
+                key={f}
+                className="rounded-full border border-background/15 px-3 py-1 text-[0.65rem] font-medium text-background/50 uppercase tracking-wide"
+              >
+                {f}
+              </span>
+            ))}
           </div>
         </div>
 
-        {/* Auth card */}
-        <Card className="shadow-2xl border-border/50 backdrop-blur-sm">
-          <CardHeader className="pb-0">
-            <Tabs defaultValue="signin" className="w-full">
-              <TabsList className="w-full">
-                <TabsTrigger value="signin" className="flex-1">
-                  Sign In
-                </TabsTrigger>
-                <TabsTrigger value="signup" className="flex-1">
-                  Create Account
-                </TabsTrigger>
-              </TabsList>
+        {/* Bottom: tagline */}
+        <p className="text-[0.65rem] text-background/25 font-medium uppercase tracking-widest">
+          End-to-end encrypted · Audit logged
+        </p>
+      </div>
 
-              <TabsContent value="signin" className="mt-6 space-y-1">
-                <CardTitle className="text-lg font-semibold">Welcome back</CardTitle>
-                <CardDescription>
-                  Enter your credentials to access your account.
-                </CardDescription>
-                <CardContent className="px-0 pt-5 pb-0">
-                  <SignInForm />
-                </CardContent>
-              </TabsContent>
+      {/* ── Right panel — auth form ───────────────────────────── */}
+      <div className="flex items-center justify-center p-6 lg:p-16 bg-background">
+        <div className="w-full max-w-sm">
+          {/* Mobile brand */}
+          <div className="mb-10 flex items-center gap-2.5 lg:hidden">
+            <div className="flex size-8 items-center justify-center rounded-lg bg-foreground">
+              <Shield size={15} className="text-background" />
+            </div>
+            <span className="text-sm font-bold tracking-tight">PII Sanitizer</span>
+          </div>
 
-              <TabsContent value="signup" className="mt-6 space-y-1">
-                <CardTitle className="text-lg font-semibold">
-                  Create an account
-                </CardTitle>
-                <CardDescription>
-                  Join us today — it only takes a minute.
-                </CardDescription>
-                <CardContent className="px-0 pt-5 pb-0">
-                  <SignUpForm />
-                </CardContent>
-              </TabsContent>
-            </Tabs>
-          </CardHeader>
-        </Card>
+          <div className="mb-8">
+            <h2 className="text-2xl font-bold tracking-tight">Get started</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Sign in or create a new account
+            </p>
+          </div>
+
+          <Tabs defaultValue="signin" className="w-full">
+            <TabsList className="w-full h-9 bg-muted/60 rounded-md p-0.5 mb-8">
+              <TabsTrigger
+                value="signin"
+                className="flex-1 text-xs font-semibold uppercase tracking-wide data-[state=active]:bg-background data-[state=active]:shadow-sm rounded-sm"
+              >
+                Sign In
+              </TabsTrigger>
+              <TabsTrigger
+                value="signup"
+                className="flex-1 text-xs font-semibold uppercase tracking-wide data-[state=active]:bg-background data-[state=active]:shadow-sm rounded-sm"
+              >
+                Register
+              </TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="signin">
+              <SignInForm />
+            </TabsContent>
+
+            <TabsContent value="signup">
+              <SignUpForm />
+            </TabsContent>
+          </Tabs>
+        </div>
       </div>
     </div>
   );

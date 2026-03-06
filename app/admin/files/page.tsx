@@ -28,10 +28,10 @@ export default async function AdminFilesPage() {
   }));
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex flex-col gap-6 p-6 lg:p-8">
       <div className="flex items-center gap-3">
-        <h1 className="text-xl font-bold text-gray-900">All Files</h1>
-        <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-semibold text-gray-600">
+        <h1 className="text-xl font-bold text-foreground tracking-tight">All Files</h1>
+        <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-semibold text-muted-foreground">
           {files.length}
         </span>
       </div>
