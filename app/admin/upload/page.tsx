@@ -15,6 +15,7 @@ import {
     WifiOff,
     AlertTriangle,
     Info,
+    Layers,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -30,6 +31,7 @@ type ServiceStatus = "checking" | "ready" | "no-indic-bert" | "unavailable";
 
 const SUPPORTED_FORMATS = ["SQL", "PDF", "DOCX", "CSV", "TXT", "JSON", "PNG", "JPG"];
 const ACCEPT = ".pdf,.docx,.sql,.csv,.txt,.json,.png,.jpg,.jpeg";
+const LARGE_FILE_THRESHOLD_MB = 10;
 
 const MASKING_MODES: {
     id: MaskingMode;
@@ -150,14 +152,18 @@ export default function AdminUploadPage() {
     const [uploadState, setUploadState] = useState<UploadState>("idle");
     const [isDragging, setIsDragging] = useState(false);
     const [filename, setFilename] = useState("");
+    const [fileSizeMb, setFileSizeMb] = useState(0);
     const [piiCount, setPiiCount] = useState(0);
     const [errorMsg, setErrorMsg] = useState("");
     const [uploadedFileId, setUploadedFileId] = useState<string | null>(null);
     const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
     const [uploadWarning, setUploadWarning] = useState<string | null>(null);
+    const [chunkInfo, setChunkInfo] = useState<{ total: number; completed: number } | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const redirectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const isLargeFile = fileSizeMb > LARGE_FILE_THRESHOLD_MB;
 
     // ── Service health check ──────────────────────────────────────────────────
     useEffect(() => {
@@ -194,8 +200,17 @@ export default function AdminUploadPage() {
         async (file: File) => {
             if (pollRef.current) clearInterval(pollRef.current);
             setFilename(file.name);
+            setFileSizeMb(file.size / 1024 / 1024);
             setUploadState("uploading");
             setErrorMsg("");
+
+            const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+            if (file.size > MAX_FILE_SIZE) {
+                setErrorMsg(`File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum allowed size is 100 MB.`);
+                setUploadState("error");
+                return;
+            }
+
             try {
                 const formData = new FormData();
                 formData.append("file", file);
@@ -207,9 +222,10 @@ export default function AdminUploadPage() {
                     setUploadState("error");
                     return;
                 }
-                const { file: dbFile, warning } = await res.json();
+                        const { file: dbFile, warning } = await res.json();
                 if (warning) setUploadWarning(warning);
                 setUploadedFileId(dbFile.id);
+                setChunkInfo(null);
                 setUploadState("processing");
                 pollRef.current = setInterval(async () => {
                     try {
@@ -219,6 +235,12 @@ export default function AdminUploadPage() {
                         if (data.status === "DONE") {
                             clearInterval(pollRef.current!);
                             setPiiCount(data.totalPiiFound ?? 0);
+                            if (data.processingInfo?.chunked_processing) {
+                                setChunkInfo({
+                                    total: data.processingInfo.total_chunks ?? 0,
+                                    completed: data.processingInfo.completed_chunks ?? 0,
+                                });
+                            }
                             setUploadState("done");
                             redirectRef.current = setTimeout(() => {
                                 router.push(`/admin/files/${dbFile.id}`);
@@ -258,9 +280,11 @@ export default function AdminUploadPage() {
         if (redirectRef.current) clearTimeout(redirectRef.current);
         setUploadState("idle");
         setFilename("");
+        setFileSizeMb(0);
         setPiiCount(0);
         setErrorMsg("");
         setUploadedFileId(null);
+        setChunkInfo(null);
         if (fileInputRef.current) fileInputRef.current.value = "";
     };
 
@@ -272,7 +296,15 @@ export default function AdminUploadPage() {
                 <div className="flex flex-col items-center gap-4">
                     <Loader2 size={44} className="animate-spin text-blue-500" />
                     <p className="text-sm font-medium text-gray-700">
-                        Uploading <span className="font-semibold text-gray-900">{filename}</span>…
+                        Uploading{" "}
+                        <span className="font-semibold text-gray-900">
+                            {filename}
+                            {fileSizeMb > 0 && (
+                                <span className="ml-1 font-normal text-gray-500">
+                                    ({fileSizeMb.toFixed(1)} MB)
+                                </span>
+                            )}
+                        </span>…
                     </p>
                     <ProgressBar />
                 </div>
@@ -280,6 +312,27 @@ export default function AdminUploadPage() {
         }
 
         if (uploadState === "processing") {
+            if (isLargeFile) {
+                return (
+                    <div className="flex flex-col items-center gap-4">
+                        <Layers size={44} className="animate-pulse text-purple-500" />
+                        <div className="text-center">
+                            <p className="text-sm font-semibold text-gray-800">
+                                Processing large file in parallel chunks…
+                            </p>
+                            <p className="mt-0.5 text-xs text-gray-400">
+                                {fileSizeMb.toFixed(1)} MB — splitting into chunks for parallel PII detection
+                            </p>
+                            {chunkInfo && (
+                                <p className="mt-1 text-xs font-medium text-purple-600">
+                                    Chunk {chunkInfo.completed} of {chunkInfo.total} complete
+                                </p>
+                            )}
+                        </div>
+                        <ProgressBar indeterminate />
+                    </div>
+                );
+            }
             return (
                 <div className="flex flex-col items-center gap-4">
                     <Loader2 size={44} className="animate-spin text-purple-500" />

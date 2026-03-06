@@ -2,7 +2,7 @@
 
 # PII Shield
 
-**Automated PII detection and sanitization for Indian enterprise documents**
+**Automated PII detection and sanitization for Indian enterprise documents — up to 100 MB**
 
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)](https://python.org/)
@@ -12,7 +12,9 @@
 
 PII Shield scans uploaded files for personally identifiable information, sanitizes the content using one of three configurable modes (Redact, Mask, or Tokenize), and returns a clean version of the file — all within a secure, role-gated web application built for Indian regulatory compliance (IT Act 2000, DPDPA 2023, RBI guidelines).
 
-[Features](#-features) · [Architecture](#-architecture) · [Quick Start](#-quick-start) · [API Reference](#-api-reference) · [Contributing](#-contributing)
+Files under 10 MB are processed in a single pass. Files between 10 MB and 100 MB are automatically split into parallel chunks, processed concurrently, and merged — with live chunk progress visible in both the upload UI and the file detail page.
+
+[Features](#-features) · [Architecture](#-architecture) · [Quick Start](#-quick-start) · [Large File Processing](#-large-file-processing) · [API Reference](#-api-reference) · [Contributing](#-contributing)
 
 ---
 
@@ -54,11 +56,13 @@ PII Shield scans uploaded files for personally identifiable information, sanitiz
 | **Indian PII Specialization** | Aadhaar, PAN, UPI ID, IFSC codes, Indian phone numbers, passport, Indian addresses |
 | **Three Sanitization Modes** | Redact (`[REDACTED]`), Mask (`j***@g***.com`), Tokenize (`<<EMAIL_001>>`) |
 | **8 File Formats** | SQL, CSV, PDF, DOCX, TXT, JSON, PNG, JPG |
+| **Large File Support (up to 100 MB)** | Files >10 MB are split into chunks and processed in parallel; results are merged automatically |
+| **Chunk Progress UI** | Upload page shows live chunk progress for large files; file detail page shows a "Large File Processing" info card |
 | **Role-Based Access** | Admin (upload, view all, download original + sanitized) vs User (view & download sanitized only) |
 | **Full Audit Trail** | Every login, upload, scan, view, and download is logged with IP and timestamp |
 | **Real-Time Progress** | Upload page polls file status and auto-redirects to the detail view on completion |
 | **Service Health Banner** | Upload page checks Python service readiness before allowing uploads |
-| **DPDPA / RBI Compliant** | 90-day audit retention, PII never exposed to unauthorized roles |
+| **DPDPA / RBI Compliant** | Audit retention, PII never exposed to unauthorized roles |
 
 ---
 

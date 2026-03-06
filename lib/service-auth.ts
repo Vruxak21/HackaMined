@@ -45,14 +45,16 @@ export function signRequest(body: object): Record<string, string> {
 /**
  * Send an HMAC-signed POST request to the internal Python service.
  *
- * @param endpoint - Path relative to PYTHON_SERVICE_URL (e.g. "/process")
- * @param body     - JSON-serialisable request payload
- * @returns        The raw fetch Response (caller checks res.ok / res.json())
- * @throws Error("Python service timeout") when the 120 s deadline is exceeded
+ * @param endpoint  - Path relative to PYTHON_SERVICE_URL (e.g. "/process")
+ * @param body      - JSON-serialisable request payload
+ * @param timeoutMs - Abort deadline in milliseconds (default 120 s; use 600 s for large files)
+ * @returns         The raw fetch Response (caller checks res.ok / res.json())
+ * @throws Error("Python service timeout") when the deadline is exceeded
  */
 export async function callPythonService(
   endpoint: string,
   body: object,
+  timeoutMs: number = 120_000,
 ): Promise<Response> {
   const baseUrl = process.env.PYTHON_SERVICE_URL ?? "http://localhost:8000";
   const url = baseUrl + endpoint;
@@ -63,7 +65,7 @@ export async function callPythonService(
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     if (err instanceof Error && err.name === "TimeoutError") {

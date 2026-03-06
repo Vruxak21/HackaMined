@@ -11,6 +11,7 @@ import {
   Check,
   Loader2,
   AlertTriangle,
+  Layers,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,6 +37,13 @@ type FileDetailData = {
   piiSummary: Record<string, number>;
   layerBreakdown: { regex: number; presidio_spacy: number; indic_bert: number };
   confidenceBreakdown: { high_confidence?: number; high?: number; medium_confidence?: number; medium?: number };
+  processingInfo?: {
+    file_size_mb: number;
+    total_chunks: number;
+    completed_chunks: number;
+    failed_chunks: number;
+    chunked_processing: boolean;
+  } | null;
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -223,7 +231,7 @@ export default function AdminFileDetailPage({
     );
   }
 
-  const { file, piiSummary, originalContent, sanitizedContent, layerBreakdown, confidenceBreakdown } = data;
+  const { file, piiSummary, originalContent, sanitizedContent, layerBreakdown, confidenceBreakdown, processingInfo } = data;
   const modeStyle = maskingModeStyle[file.maskingMode];
   const highCount = confidenceBreakdown?.high_confidence ?? confidenceBreakdown?.high ?? 0;
   const mediumCount = confidenceBreakdown?.medium_confidence ?? confidenceBreakdown?.medium ?? 0;
@@ -302,8 +310,27 @@ export default function AdminFileDetailPage({
             </p>
           </CardHeader>
 
-          <CardContent className="flex flex-col gap-5">
-            {/* Detection Layer Breakdown */}
+          <CardContent className="flex flex-col gap-5">            {/* Large File Processing Info */}
+            {processingInfo?.chunked_processing && (
+              <div className="rounded-lg border border-purple-200 bg-purple-50 px-4 py-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <Layers size={15} className="text-purple-600 shrink-0" />
+                  <p className="text-xs font-semibold text-purple-800">Large File Processing</p>
+                </div>
+                <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-purple-700">
+                  <span>File size</span>
+                  <span className="font-medium">{processingInfo.file_size_mb.toFixed(1)} MB</span>
+                  <span>Processed in</span>
+                  <span className="font-medium">{processingInfo.total_chunks} chunks</span>
+                  <span>Parallel workers</span>
+                  <span className="font-medium">auto</span>
+                  <span>Completed chunks</span>
+                  <span className="font-medium">
+                    {processingInfo.completed_chunks} / {processingInfo.total_chunks}
+                  </span>
+                </div>
+              </div>
+            )}            {/* Detection Layer Breakdown */}
             <div>
               <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-500">
                 Detection Layer Breakdown

@@ -11,8 +11,10 @@ model loading happens once at service startup, not per request.
 
 from __future__ import annotations
 
-import warnings
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
 from presidio_analyzer.nlp_engine import NlpEngineProvider
@@ -63,10 +65,7 @@ class PIIAnalyzer:
                 aggregation_strategy="simple",
             )
         except Exception:
-            warnings.warn(
-                "indic-bert unavailable, falling back to spaCy only",
-                stacklevel=1,
-            )
+            logger.info("indic-bert unavailable, falling back to spaCy only")
             self.indic_ner = None
 
         # ── Shared utilities ──────────────────────────────────────────────────

@@ -37,6 +37,7 @@ export async function GET(
       piiSummary: true,
       layerBreakdown: true,
       processedAt: true,
+      processingInfo: true,
     },
   });
 
@@ -50,5 +51,6 @@ export async function GET(
     piiSummary: decryptJSON(file.piiSummary),
     layerBreakdown: decryptJSON(file.layerBreakdown),
     processedAt: file.processedAt,
+    processingInfo: file.processingInfo ? JSON.parse(file.processingInfo) : null,
   });
 }

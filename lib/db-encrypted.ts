@@ -38,6 +38,8 @@ export interface ProcessingResult {
   layerBreakdown: object;
   confidenceBreakdown: object;
   processedAt: Date;
+  /** Chunking metadata — not sensitive, stored as plain JSON (not encrypted) */
+  processingInfo?: object;
 }
 
 export interface AuditLogInput {
@@ -65,6 +67,11 @@ function decryptFile(file: Record<string, any>): Record<string, any> {
     confidenceBreakdown:
       file.confidenceBreakdown != null
         ? decryptJSON(file.confidenceBreakdown)
+        : null,
+    // processingInfo is not sensitive — stored and returned as plain JSON
+    processingInfo:
+      file.processingInfo != null
+        ? JSON.parse(file.processingInfo)
         : null,
   };
 }
@@ -107,6 +114,9 @@ export async function updateFileAfterProcessing(
       confidenceBreakdown: encryptJSON(data.confidenceBreakdown),
       processedAt: data.processedAt,
       encryptionKeyVersion: parseInt(KEY_VERSION, 10),
+      ...(data.processingInfo !== undefined && {
+        processingInfo: JSON.stringify(data.processingInfo),
+      }),
     },
   });
   return decryptFile(record);

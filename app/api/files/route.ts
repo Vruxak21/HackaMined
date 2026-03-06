@@ -13,7 +13,8 @@ const ALLOWED_EXTENSIONS = new Set([
   "pdf", "docx", "doc", "sql", "csv", "txt", "json", "png", "jpg", "jpeg",
 ]);
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+const LARGE_FILE_THRESHOLD = 5 * 1024 * 1024;  // 5 MB → chunked path in Python
 
 // Helper: detect Next.js redirect errors thrown by requireAdmin/requireAuth
 function isRedirectError(err: unknown): boolean {
@@ -41,7 +42,11 @@ async function processFileInBackground(
     // Step 1: Write decoded bytes to a temp file
     await writeFile(tmpPath, Buffer.from(base64, "base64"));
 
-    // Step 2: Call the Python service (120 s timeout, HMAC-signed)
+    // Step 2: Call the Python service (HMAC-signed)
+    // Large files use the chunked parallel path (up to 10 min); small files 2 min.
+    const fileSizeApprox = Math.floor(base64.length * 3 / 4);
+    const timeoutMs = fileSizeApprox > LARGE_FILE_THRESHOLD ? 600_000 : 120_000;
+
     let res: Response;
     try {
       res = await callPythonService("/process", {
@@ -49,7 +54,7 @@ async function processFileInBackground(
         output_path: outPath,
         file_type: ext,
         mode,
-      });
+      }, timeoutMs);
     } catch (fetchErr) {
       if (fetchErr instanceof Error && fetchErr.message === "Python service timeout") {
         throw new Error("Processing timeout — file may be too large");
@@ -67,6 +72,7 @@ async function processFileInBackground(
       total_pii?: number;
       layer_breakdown?: Record<string, number>;
       confidence_breakdown?: Record<string, number>;
+      processing_info?: Record<string, unknown>;
     } = await res.json();
 
     if (!result.success) {
@@ -82,6 +88,7 @@ async function processFileInBackground(
       totalPiiFound: result.total_pii ?? 0,
       layerBreakdown: result.layer_breakdown ?? {},
       confidenceBreakdown: result.confidence_breakdown ?? {},
+      processingInfo: result.processing_info,
       processedAt: new Date(),
     });
 
@@ -158,7 +165,7 @@ export async function POST(req: NextRequest) {
   // 3b. Validate size
   if (file.size > MAX_FILE_SIZE) {
     return NextResponse.json(
-      { error: "File size exceeds the 10 MB limit" },
+      { error: "File size exceeds the 100 MB limit" },
       { status: 400 },
     );
   }

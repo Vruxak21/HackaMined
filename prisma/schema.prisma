@@ -133,6 +133,9 @@ model File {
   /// JSON string: {"high":8,"medium":2,"low":0}
   confidenceBreakdown String? @db.Text
 
+  /// JSON string: chunking metadata e.g. {"chunked_processing":true,"total_chunks":3,"file_size_mb":42.5}
+  processingInfo String? @db.Text
+
   uploadedBy String
   uploader   User   @relation(fields: [uploadedBy], references: [id], onDelete: Cascade)
 

@@ -77,6 +77,7 @@ export async function GET(
       piiSummary: file.piiSummary,
       layerBreakdown: file.layerBreakdown,
       confidenceBreakdown: file.confidenceBreakdown,
+      processingInfo: file.processingInfo ?? null,
     });
   }
 
