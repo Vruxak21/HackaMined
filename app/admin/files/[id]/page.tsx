@@ -772,7 +772,7 @@ export default function AdminFileDetailPage({
             />
           </div>
         ) : (
-          <div className="h-[700px]">
+          <div className="h-175">
             <PiiDiffViewer
               originalText={originalContent}
               sanitizedText={sanitizedContent}

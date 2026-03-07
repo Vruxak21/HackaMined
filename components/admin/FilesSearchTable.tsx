@@ -56,16 +56,16 @@ function FileIcon({ type }: { type: string }) {
   }
 }
 
-const statusStyle: Record<FileRow["status"], { bg: string; text: string; label: string }> = {
-  PROCESSING: { bg: "bg-yellow-100", text: "text-yellow-700", label: "Processing" },
-  DONE:       { bg: "bg-green-100",  text: "text-green-700",  label: "Done" },
-  FAILED:     { bg: "bg-red-100",    text: "text-red-700",    label: "Failed" },
+const statusStyle: Record<FileRow["status"], { bg: string; text: string; dot: string; label: string }> = {
+  PROCESSING: { bg: "bg-warning-bg border border-warning-border", text: "text-warning", dot: "bg-warning", label: "Processing" },
+  DONE:       { bg: "bg-success-bg border border-success-border", text: "text-success", dot: "bg-success", label: "Done" },
+  FAILED:     { bg: "bg-danger-bg border border-danger-border",   text: "text-danger",  dot: "bg-danger",  label: "Failed" },
 };
 
 const modeStyle: Record<FileRow["maskingMode"], { bg: string; text: string }> = {
-  redact:   { bg: "bg-red-100",    text: "text-red-700" },
-  mask:     { bg: "bg-yellow-100", text: "text-yellow-700" },
-  tokenize: { bg: "bg-blue-100",   text: "text-blue-700" },
+  redact:   { bg: "bg-danger-bg border border-danger-border",   text: "text-danger" },
+  mask:     { bg: "bg-warning-bg border border-warning-border", text: "text-warning" },
+  tokenize: { bg: "bg-info-bg border border-info-border",       text: "text-info" },
 };
 
 function formatDate(d: Date | string) {
@@ -91,7 +91,7 @@ export function FilesSearchTable({ files }: { files: FileRow[] }) {
     <div className="flex flex-col gap-4">
       {/* Search input */}
       <div className="relative w-full max-w-sm">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-gray-400 pointer-events-none" />
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
         <Input
           placeholder="Search by name or user…"
           value={query}
@@ -102,24 +102,24 @@ export function FilesSearchTable({ files }: { files: FileRow[] }) {
 
       {/* Table */}
       {filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-3 py-20 text-gray-400">
+        <div className="flex flex-col items-center justify-center gap-3 py-20 text-muted-foreground">
           <Files size={36} className="opacity-40" />
           <p className="text-sm font-medium">
             {query ? "No files match your search." : "No files uploaded yet."}
           </p>
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-gray-200">
+        <div className="overflow-x-auto rounded-lg border border-border">
           <Table>
             <TableHeader>
-              <TableRow className="bg-gray-50">
-                <TableHead>File</TableHead>
-                <TableHead>Uploaded By</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>PII Found</TableHead>
-                <TableHead>Masking Mode</TableHead>
-                <TableHead>Date</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+              <TableRow className="bg-muted/40 hover:bg-muted/40">
+                <TableHead className="text-[0.62rem] font-semibold uppercase tracking-wider text-muted-foreground">File</TableHead>
+                <TableHead className="text-[0.62rem] font-semibold uppercase tracking-wider text-muted-foreground">Uploaded By</TableHead>
+                <TableHead className="text-[0.62rem] font-semibold uppercase tracking-wider text-muted-foreground">Status</TableHead>
+                <TableHead className="text-[0.62rem] font-semibold uppercase tracking-wider text-muted-foreground">PII Found</TableHead>
+                <TableHead className="text-[0.62rem] font-semibold uppercase tracking-wider text-muted-foreground">Masking Mode</TableHead>
+                <TableHead className="text-[0.62rem] font-semibold uppercase tracking-wider text-muted-foreground">Date</TableHead>
+                <TableHead className="text-right text-[0.62rem] font-semibold uppercase tracking-wider text-muted-foreground">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -127,44 +127,46 @@ export function FilesSearchTable({ files }: { files: FileRow[] }) {
                 const s = statusStyle[file.status];
                 const m = modeStyle[file.maskingMode];
                 return (
-                  <TableRow key={file.id} className="hover:bg-gray-50/50">
+                  <TableRow key={file.id} className="hover:bg-muted/40 transition-colors duration-100">
                     {/* File */}
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <FileIcon type={file.fileType} />
-                        <span className="max-w-45 truncate text-sm font-medium text-gray-800">
+                        <span className="max-w-45 truncate text-sm font-medium text-foreground">
                           {file.originalName}
                         </span>
-                        <span className="rounded bg-gray-100 px-1.5 py-px text-[10px] font-semibold uppercase text-gray-500">
+                        <span className="rounded bg-muted px-1.5 py-px text-[10px] font-semibold uppercase text-muted-foreground">  
                           {file.fileType}
                         </span>
                       </div>
                     </TableCell>
                     {/* Uploaded By */}
-                    <TableCell className="text-sm text-gray-600">{file.uploadedBy}</TableCell>
+                    <TableCell className="font-code text-xs text-muted-foreground">{file.uploadedBy}</TableCell>
                     {/* Status */}
                     <TableCell>
-                      <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold", s.bg, s.text)}>
-                        {file.status === "PROCESSING" && <Loader2 size={10} className="animate-spin" />}
+                      <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[0.65rem] font-semibold", s.bg, s.text)}>
+                        {file.status === "PROCESSING"
+                          ? <Loader2 size={10} className="animate-spin" />
+                          : <span className={cn("size-1.5 rounded-full", s.dot)} />}
                         {s.label}
                       </span>
                     </TableCell>
                     {/* PII Found */}
                     <TableCell>
                       {file.totalPiiFound > 0 ? (
-                        <span className="text-sm font-bold text-red-600">{file.totalPiiFound}</span>
+                        <span className="font-display text-sm font-bold tabular-nums text-danger">{file.totalPiiFound}</span>
                       ) : (
-                        <span className="text-sm text-gray-400">—</span>
+                        <span className="text-sm text-muted-foreground">—</span>
                       )}
                     </TableCell>
                     {/* Masking Mode */}
                     <TableCell>
-                      <span className={cn("rounded px-2 py-0.5 text-xs font-semibold capitalize", m.bg, m.text)}>
+                      <span className={cn("inline-flex items-center rounded-full px-2.5 py-0.5 text-[0.65rem] font-semibold capitalize", m.bg, m.text)}>
                         {file.maskingMode}
                       </span>
                     </TableCell>
                     {/* Date */}
-                    <TableCell className="text-sm text-gray-500">{formatDate(file.uploadedAt)}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{formatDate(file.uploadedAt)}</TableCell>
                     {/* Actions */}
                     <TableCell className="text-right">
                       <Button asChild variant="outline" size="sm">

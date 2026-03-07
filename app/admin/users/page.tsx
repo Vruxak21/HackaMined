@@ -44,13 +44,18 @@ export default async function AdminUsersPage() {
   }));
 
   return (
-    <div className="flex flex-col gap-6 p-6 lg:p-8">
+    <div className="flex flex-col gap-6 p-6 lg:p-8 animate-fade-slide-up">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <h1 className="text-xl font-bold text-foreground tracking-tight">Users</h1>
-        <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-semibold text-muted-foreground">
-          {users.length} total
-        </span>
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-3">
+            <h1 className="font-display text-2xl font-bold tracking-tight text-foreground">Users</h1>
+            <span className="inline-flex items-center rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs font-semibold text-muted-foreground">
+              {users.length} total
+            </span>
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">All registered accounts and their access levels</p>
+        </div>
       </div>
 
       {/* Table */}

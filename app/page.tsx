@@ -15,6 +15,9 @@ import {
   Loader2,
   Chrome,
   Shield,
+  ShieldCheck,
+  Database,
+  Key,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -22,6 +25,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { signIn, signUp, useSession } from "@/lib/auth-client";
 
 // ── Zod Schemas ──────────────────────────────────────────────────────────────
@@ -59,12 +63,12 @@ function Field({
 }) {
   return (
     <div className="space-y-1.5">
-      <Label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+      <Label className="text-[0.65rem] font-semibold uppercase tracking-widest text-muted-foreground">
         {label}
       </Label>
       {children}
       {error && (
-        <p className="text-[0.75rem] text-destructive leading-tight">{error}</p>
+        <p className="text-xs text-destructive leading-tight">{error}</p>
       )}
     </div>
   );
@@ -85,13 +89,13 @@ function PasswordInput({
         id={id}
         type={show ? "text" : "password"}
         placeholder={placeholder}
-        className="pl-9 pr-9 h-10 border-border/70 bg-background focus:border-primary"
+        className="pl-9 pr-9 h-10 bg-muted/60 border-border focus-visible:border-primary focus-visible:ring-0 focus-visible:shadow-[0_0_0_3px_rgba(214,89,174,0.15)]"
         {...rest}
       />
       <button
         type="button"
         onClick={() => setShow((v) => !v)}
-        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
         aria-label={show ? "Hide password" : "Show password"}
       >
         {show ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
@@ -143,15 +147,16 @@ function SignInForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
       <Field label="Email" error={errors.email?.message}>
         <div className="relative">
           <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
           <Input
             id="signin-email"
             type="email"
-            placeholder="you@example.com"
-            className="pl-9 h-10 border-border/70 bg-background focus:border-primary"
+            placeholder="you@company.com"
+            autoComplete="email"
+            className="pl-9 h-10 bg-muted/60 border-border focus-visible:border-primary focus-visible:ring-0 focus-visible:shadow-[0_0_0_3px_rgba(214,89,174,0.15)]"
             {...register("email")}
           />
         </div>
@@ -162,12 +167,13 @@ function SignInForm() {
           <PasswordInput
             id="signin-password"
             placeholder="••••••••"
+            autoComplete="current-password"
             {...register("password")}
           />
           <div className="flex justify-end">
             <button
               type="button"
-              className="text-[0.7rem] text-muted-foreground hover:text-foreground"
+              className="text-[0.7rem] text-primary/80 hover:text-primary transition-colors"
             >
               Forgot password?
             </button>
@@ -177,7 +183,7 @@ function SignInForm() {
 
       <Button
         type="submit"
-        className="w-full h-10 bg-primary text-primary-foreground hover:bg-primary/90 font-semibold tracking-wide"
+        className="w-full h-10 bg-primary text-primary-foreground hover:bg-primary/90 font-semibold tracking-wide font-body active:scale-[0.97] transition-all duration-150"
         disabled={loading}
       >
         {loading ? (
@@ -186,20 +192,23 @@ function SignInForm() {
             Signing in…
           </>
         ) : (
-          "Sign In"
+          <>
+            <Shield className="size-4" />
+            Sign In
+          </>
         )}
       </Button>
 
       <div className="flex items-center gap-3">
         <Separator className="flex-1" />
-        <span className="text-[0.7rem] uppercase tracking-widest text-muted-foreground">or</span>
+        <span className="text-[0.65rem] uppercase tracking-widest text-muted-foreground">or</span>
         <Separator className="flex-1" />
       </div>
 
       <Button
         type="button"
         variant="outline"
-        className="w-full h-10 gap-2 border-border/70"
+        className="w-full h-10 gap-2 font-body font-medium active:scale-[0.97] transition-all duration-150"
         onClick={handleGoogle}
         disabled={googleLoading}
       >
@@ -258,7 +267,7 @@ function SignUpForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
       <Field label="Full Name" error={errors.name?.message}>
         <div className="relative">
           <User className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
@@ -266,20 +275,22 @@ function SignUpForm() {
             id="signup-name"
             type="text"
             placeholder="Jane Doe"
-            className="pl-9 h-10 border-border/70 bg-background focus:border-primary"
+            autoComplete="name"
+            className="pl-9 h-10 bg-muted/60 border-border focus-visible:border-primary focus-visible:ring-0 focus-visible:shadow-[0_0_0_3px_rgba(214,89,174,0.15)]"
             {...register("name")}
           />
         </div>
       </Field>
 
-      <Field label="Email" error={errors.email?.message}>
+      <Field label="Work Email" error={errors.email?.message}>
         <div className="relative">
           <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
           <Input
             id="signup-email"
             type="email"
-            placeholder="you@example.com"
-            className="pl-9 h-10 border-border/70 bg-background focus:border-primary"
+            placeholder="you@company.com"
+            autoComplete="email"
+            className="pl-9 h-10 bg-muted/60 border-border focus-visible:border-primary focus-visible:ring-0 focus-visible:shadow-[0_0_0_3px_rgba(214,89,174,0.15)]"
             {...register("email")}
           />
         </div>
@@ -289,6 +300,7 @@ function SignUpForm() {
         <PasswordInput
           id="signup-password"
           placeholder="Min. 8 characters"
+          autoComplete="new-password"
           {...register("password")}
         />
       </Field>
@@ -297,13 +309,14 @@ function SignUpForm() {
         <PasswordInput
           id="signup-confirm"
           placeholder="Repeat your password"
+          autoComplete="new-password"
           {...register("confirmPassword")}
         />
       </Field>
 
       <Button
         type="submit"
-        className="w-full h-10 bg-primary text-primary-foreground hover:bg-primary/90 font-semibold tracking-wide"
+        className="w-full h-10 bg-primary text-primary-foreground hover:bg-primary/90 font-semibold tracking-wide font-body active:scale-[0.97] transition-all duration-150"
         disabled={loading}
       >
         {loading ? (
@@ -312,20 +325,23 @@ function SignUpForm() {
             Creating account…
           </>
         ) : (
-          "Create Account"
+          <>
+            <Shield className="size-4" />
+            Create Account
+          </>
         )}
       </Button>
 
       <div className="flex items-center gap-3">
         <Separator className="flex-1" />
-        <span className="text-[0.7rem] uppercase tracking-widest text-muted-foreground">or</span>
+        <span className="text-[0.65rem] uppercase tracking-widest text-muted-foreground">or</span>
         <Separator className="flex-1" />
       </div>
 
       <Button
         type="button"
         variant="outline"
-        className="w-full h-10 gap-2 border-border/70"
+        className="w-full h-10 gap-2 font-body font-medium active:scale-[0.97] transition-all duration-150"
         onClick={handleGoogle}
         disabled={googleLoading}
       >
@@ -337,18 +353,85 @@ function SignUpForm() {
         Continue with Google
       </Button>
 
-      <p className="text-center text-[0.7rem] text-muted-foreground">
+      <p className="text-center text-xs text-muted-foreground">
         By creating an account you agree to our{" "}
-        <span className="underline underline-offset-2 cursor-pointer hover:text-foreground">
-          Terms of Service
-        </span>{" "}
+        <span className="text-primary hover:underline cursor-pointer">Terms of Service</span>{" "}
         &{" "}
-        <span className="underline underline-offset-2 cursor-pointer hover:text-foreground">
-          Privacy Policy
-        </span>
-        .
+        <span className="text-primary hover:underline cursor-pointer">Privacy Policy</span>.
       </p>
     </form>
+  );
+}
+
+// ── Trust Signal ──────────────────────────────────────────────────────────────
+
+function TrustSignal({
+  icon,
+  stat,
+  desc,
+}: {
+  icon: React.ReactNode;
+  stat: string;
+  desc: string;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary mt-0.5">
+        {icon}
+      </div>
+      <div>
+        <p className="text-sm font-bold text-foreground font-display leading-tight">{stat}</p>
+        <p className="text-xs text-muted-foreground mt-0.5">{desc}</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Background Pattern ────────────────────────────────────────────────────────
+
+function NetworkPattern() {
+  return (
+    <svg
+      className="absolute inset-0 w-full h-full opacity-[0.04]"
+      viewBox="0 0 600 600"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <defs>
+        <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+          <path d="M 40 0 L 0 0 0 40" fill="none" stroke="currentColor" strokeWidth="0.5" />
+        </pattern>
+      </defs>
+      <rect width="600" height="600" fill="url(#grid)" />
+      {/* Nodes */}
+      {[
+        [80, 120], [240, 80], [400, 160], [520, 80],
+        [160, 280], [300, 240], [460, 300], [80, 400],
+        [220, 440], [380, 400], [520, 460], [140, 540],
+        [440, 520],
+      ].map(([x, y], i) => (
+        <circle key={i} cx={x} cy={y} r="3" fill="currentColor" />
+      ))}
+      {/* Edges */}
+      <g stroke="currentColor" strokeWidth="0.8" fill="none">
+        <line x1="80" y1="120" x2="240" y2="80" />
+        <line x1="240" y1="80" x2="400" y2="160" />
+        <line x1="400" y1="160" x2="520" y2="80" />
+        <line x1="80" y1="120" x2="160" y2="280" />
+        <line x1="240" y1="80" x2="300" y2="240" />
+        <line x1="400" y1="160" x2="460" y2="300" />
+        <line x1="160" y1="280" x2="300" y2="240" />
+        <line x1="300" y1="240" x2="460" y2="300" />
+        <line x1="160" y1="280" x2="80" y2="400" />
+        <line x1="300" y1="240" x2="220" y2="440" />
+        <line x1="460" y1="300" x2="380" y2="400" />
+        <line x1="80" y1="400" x2="220" y2="440" />
+        <line x1="220" y1="440" x2="380" y2="400" />
+        <line x1="380" y1="400" x2="520" y2="460" />
+        <line x1="220" y1="440" x2="140" y2="540" />
+        <line x1="380" y1="400" x2="440" y2="520" />
+      </g>
+    </svg>
   );
 }
 
@@ -369,79 +452,119 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen grid lg:grid-cols-2">
-      {/* ── Left panel — branding ─────────────────────────────── */}
-      <div className="hidden lg:flex flex-col justify-between bg-foreground text-background p-12">
+    <div className="min-h-screen lg:grid lg:grid-cols-[55%_45%] bg-background">
+
+      {/* ── Left panel — brand ─────────────────────────────────── */}
+      <div className="relative hidden lg:flex flex-col justify-between overflow-hidden bg-muted p-14">
+        {/* Subtle gradient overlay */}
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              "radial-gradient(ellipse 70% 60% at 20% 40%, rgba(214,89,174,0.06) 0%, transparent 70%), radial-gradient(ellipse 50% 50% at 80% 80%, rgba(214,89,174,0.04) 0%, transparent 60%)",
+          }}
+        />
+
+        {/* Data-flow network pattern */}
+        <NetworkPattern />
+
         {/* Top: wordmark */}
-        <div className="flex items-center gap-2.5">
-          <div className="flex size-8 items-center justify-center rounded-lg bg-primary">
-            <Shield size={15} className="text-foreground" />
+        <div className="relative flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary shadow-[0_0_20px_rgba(214,89,174,0.3)]">
+            <Shield size={16} className="text-primary-foreground" />
           </div>
-          <span className="text-sm font-bold tracking-tight">PII Sanitizer</span>
+          <div>
+            <p className="font-display text-sm font-bold tracking-tight text-foreground leading-none">PII Sentinel</p>
+            <p className="text-[0.6rem] font-semibold uppercase tracking-widest text-muted-foreground mt-0.5">by Tribastion</p>
+          </div>
         </div>
 
         {/* Middle: hero copy */}
-        <div className="space-y-6">
-          <div className="space-y-3">
-            <p className="text-[0.65rem] uppercase tracking-[0.2em] text-background/40 font-semibold">
-              HackaMined &apos;26
-            </p>
-            <h1 className="text-4xl font-bold leading-[1.15] tracking-tight">
-              Protect what<br />matters most.
+        <div className="relative space-y-8">
+          <div className="space-y-4">
+            <h1 className="font-display text-[2.6rem] font-extrabold leading-[1.1] tracking-tight text-foreground">
+              Protect your<br />
+              <span className="text-primary">sensitive data.</span><br />
+              At enterprise scale.
             </h1>
-            <p className="text-sm text-background/50 leading-relaxed max-w-xs">
-              Automatically detect and sanitize personally identifiable information from your documents — securely and at scale.
+            <p className="text-sm text-muted-foreground leading-relaxed max-w-sm">
+              PII Sentinel automatically detects and sanitizes personally identifiable information from documents —
+              with full audit trails, AES-256-GCM encryption, and AI-powered accuracy.
             </p>
           </div>
 
-          {/* Feature pills */}
-          <div className="flex flex-wrap gap-2">
-            {["AES-256-GCM", "16 PII types", "PDF · SQL · CSV · JSON"].map((f) => (
-              <span
-                key={f}
-                className="rounded-full border border-background/15 px-3 py-1 text-[0.65rem] font-medium text-background/50 uppercase tracking-wide"
-              >
-                {f}
-              </span>
-            ))}
+          {/* Trust signals */}
+          <div className="space-y-4">
+            <TrustSignal
+              icon={<Database size={14} />}
+              stat="19+ PII Types"
+              desc="Names, IDs, cards, biometrics, and more"
+            />
+            <TrustSignal
+              icon={<Key size={14} />}
+              stat="AES-256-GCM Encrypted"
+              desc="Data at rest and in transit, always"
+            />
+            <TrustSignal
+              icon={<ShieldCheck size={14} />}
+              stat="Full Audit Trail"
+              desc="Every action logged, timestamped, and immutable"
+            />
           </div>
         </div>
 
-        {/* Bottom: tagline */}
-        <p className="text-[0.65rem] text-background/25 font-medium uppercase tracking-widest">
-          End-to-end encrypted · Audit logged
-        </p>
+        {/* Bottom: badge row */}
+        <div className="relative flex flex-wrap gap-2">
+          {["SOC 2 Ready", "GDPR Compliant", "HIPAA Aligned", "End-to-End Encrypted"].map((badge) => (
+            <span
+              key={badge}
+              className="rounded-full border border-border/60 bg-background/50 px-3 py-1 text-[0.6rem] font-semibold uppercase tracking-wider text-muted-foreground"
+            >
+              {badge}
+            </span>
+          ))}
+        </div>
       </div>
 
-      {/* ── Right panel — auth form ───────────────────────────── */}
-      <div className="flex items-center justify-center p-6 lg:p-16 bg-background">
+      {/* ── Right panel — auth form ────────────────────────────── */}
+      <div className="relative flex min-h-screen items-center justify-center bg-background p-8 lg:min-h-0">
+        {/* Theme toggle — top right */}
+        <div className="absolute top-5 right-5">
+          <ThemeToggle />
+        </div>
+
         <div className="w-full max-w-sm">
           {/* Mobile brand */}
           <div className="mb-10 flex items-center gap-2.5 lg:hidden">
-            <div className="flex size-8 items-center justify-center rounded-lg bg-foreground">
-              <Shield size={15} className="text-background" />
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
+              <Shield size={14} className="text-primary-foreground" />
             </div>
-            <span className="text-sm font-bold tracking-tight">PII Sanitizer</span>
+            <div>
+              <p className="font-display text-sm font-bold tracking-tight text-foreground leading-none">PII Sentinel</p>
+              <p className="text-[0.55rem] font-semibold uppercase tracking-widest text-muted-foreground mt-0.5">by Tribastion</p>
+            </div>
           </div>
 
           <div className="mb-8">
-            <h2 className="text-2xl font-bold tracking-tight">Get started</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Sign in or create a new account
+            <h2 className="font-display text-[1.6rem] font-bold tracking-tight text-foreground leading-tight">
+              Sign in to PII Sentinel
+            </h2>
+            <p className="mt-1.5 text-sm text-muted-foreground">
+              Secure access to your workspace
             </p>
           </div>
 
           <Tabs defaultValue="signin" className="w-full">
-            <TabsList className="w-full h-9 bg-muted/60 rounded-md p-0.5 mb-8">
+            <TabsList className="w-full h-9 bg-muted rounded-md p-0.5 mb-7">
               <TabsTrigger
                 value="signin"
-                className="flex-1 text-xs font-semibold uppercase tracking-wide data-[state=active]:bg-background data-[state=active]:shadow-sm rounded-sm"
+                className="flex-1 text-[0.7rem] font-semibold uppercase tracking-widest data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm rounded-sm"
               >
                 Sign In
               </TabsTrigger>
               <TabsTrigger
                 value="signup"
-                className="flex-1 text-xs font-semibold uppercase tracking-wide data-[state=active]:bg-background data-[state=active]:shadow-sm rounded-sm"
+                className="flex-1 text-[0.7rem] font-semibold uppercase tracking-widest data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm rounded-sm"
               >
                 Register
               </TabsTrigger>
@@ -455,6 +578,10 @@ export default function Home() {
               <SignUpForm />
             </TabsContent>
           </Tabs>
+
+          <p className="mt-8 text-center text-xs text-muted-foreground">
+            Protected by Tribastion · End-to-end encrypted
+          </p>
         </div>
       </div>
     </div>

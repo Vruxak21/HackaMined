@@ -143,10 +143,10 @@ const PII_TYPES = [
 // ── Chunk mini-cards ──────────────────────────────────────────────────────────
 
 const CHUNK_CFG = {
-    pending:    { label: "Pending",    icon: Clock,        cls: "border-gray-200 bg-gray-50 text-gray-400" },
-    processing: { label: "Processing", icon: RefreshCw,    cls: "border-blue-200 bg-blue-50 text-blue-500" },
-    done:       { label: "Done",       icon: CheckCircle2, cls: "border-green-200 bg-green-50 text-green-600" },
-    failed:     { label: "Failed",     icon: XCircle,      cls: "border-red-200 bg-red-50 text-red-500" },
+    pending:    { label: "Pending",    icon: Clock,        cls: "border-border bg-muted/40 text-muted-foreground" },
+    processing: { label: "Processing", icon: RefreshCw,    cls: "border-info-border bg-info-bg text-info" },
+    done:       { label: "Done",       icon: CheckCircle2, cls: "border-success-border bg-success-bg text-success" },
+    failed:     { label: "Failed",     icon: XCircle,      cls: "border-danger-border bg-danger-bg text-danger" },
 } as const;
 type ChunkState = keyof typeof CHUNK_CFG;
 function isChunkState(s: string): s is ChunkState { return s in CHUNK_CFG; }
@@ -183,10 +183,10 @@ function MiniChunkCard({ index, total, status }: { index: number; total: number;
 
     useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
 
-    const barColor = key === "processing" ? "bg-blue-400"
-        : key === "done"    ? "bg-green-500"
-        : key === "failed"  ? "bg-red-400"
-        : "bg-gray-300";
+    const barColor = key === "processing" ? "bg-info"
+        : key === "done"    ? "bg-success"
+        : key === "failed"  ? "bg-danger"
+        : "bg-muted-foreground/30";
 
     return (
         <div className={cn("flex flex-col gap-1.5 rounded-md border p-2 transition-colors duration-300", cls)}>
@@ -288,9 +288,9 @@ function StatusBanner({
 }) {
     const colors = {
         neutral: "border-border bg-muted text-muted-foreground",
-        error: "border-destructive/20 bg-destructive/6 text-destructive",
-        info: "border-primary/20 bg-primary/6 text-foreground",
-        warning: "border-amber-200 bg-amber-50 text-amber-800",
+        error: "border-danger-border bg-danger-bg text-danger",
+        info: "border-info-border bg-info-bg text-foreground",
+        warning: "border-warning-border bg-warning-bg text-warning",
     };
     return (
         <div className={`mb-5 flex items-start gap-2.5 rounded-lg border px-4 py-3 text-sm ${colors[variant]}`}>
@@ -311,15 +311,15 @@ function PipelineModeBadge({ config }: { config?: PipelineConfigData }) {
     if (config.use_bert) {
         label = "Full AI Pipeline";
         subtitle = "Regex + spaCy + BERT — maximum accuracy";
-        cls = "border-teal-200 bg-teal-50 text-teal-700";
+        cls = "border-success-border bg-success-bg text-success";
     } else if (config.use_spacy) {
         label = "Fast Mode";
         subtitle = "Regex + spaCy — optimized for large files";
-        cls = "border-blue-200 bg-blue-50 text-blue-700";
+        cls = "border-info-border bg-info-bg text-info";
     } else {
         label = "Structured Mode";
         subtitle = "Regex only — structured data detected";
-        cls = "border-amber-200 bg-amber-50 text-amber-700";
+        cls = "border-warning-border bg-warning-bg text-warning";
     }
 
     return (
