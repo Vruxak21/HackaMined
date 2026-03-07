@@ -35,6 +35,7 @@ import { getEncryptionStatus } from "@/lib/get-encryption-status";
 import type { EncryptionStatus } from "@/lib/get-encryption-status";
 import { SecurityStatusCard } from "@/components/SecurityStatusCard";
 import { AIModelStatusCard } from "@/components/AIModelStatusCard";
+import { AnalyticsSection } from "@/components/charts/AnalyticsSection";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -209,6 +210,9 @@ export default async function AdminDashboardPage() {
                 <SecurityStatusCard initial={encRes} />
                 <AIModelStatusCard />
             </div>
+
+            {/* PII Analytics charts */}
+            <AnalyticsSection />
 
             {/* Recent uploads table */}
             <Card className="border border-border shadow-none">

@@ -243,7 +243,9 @@ export async function POST(req: NextRequest) {
 
 // ── GET /api/files — File List ─────────────────────────────────────────────
 
-export async function GET() {
+const USER_PAGE_SIZE = 10;
+
+export async function GET(req: NextRequest) {
   let user: Awaited<ReturnType<typeof requireAuth>>;
   try {
     user = await requireAuth();
@@ -260,17 +262,81 @@ export async function GET() {
     return NextResponse.json({ files: parsed });
   }
 
-  // USER: only DONE files, minimal safe fields (no content, no uploader info)
-  const files = await getFileList({ status: "DONE" });
-  const safeFiles = files.map((f) => ({
-    id: f.id,
-    originalName: f.originalName,
-    fileType: f.fileType,
-    status: f.status,
-    totalPiiFound: f.totalPiiFound,
-    uploadedAt: f.uploadedAt,
-    processedAt: f.processedAt,
-  }));
+  // USER: paginated with server-side filtering
+  const url       = new URL(req.url);
+  const page      = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
+  const q         = url.searchParams.get("q")?.trim() ?? "";
+  const fileType  = url.searchParams.get("fileType")  ?? "all";
+  const dateRange = url.searchParams.get("dateRange") ?? "all";
+  const piiRange  = url.searchParams.get("piiRange")  ?? "any";
+  const sort      = url.searchParams.get("sort")      ?? "newest";
 
-  return NextResponse.json({ files: safeFiles });
+  // Build Prisma where clause
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const where: Record<string, any> = { status: "DONE" };
+
+  if (q) {
+    where.originalName = { contains: q, mode: "insensitive" };
+  }
+
+  if (fileType !== "all") {
+    where.fileType =
+      fileType === "image"
+        ? { in: ["png", "jpg", "jpeg"] }
+        : fileType;
+  }
+
+  if (dateRange !== "all") {
+    const daysMap: Record<string, number> = { "7d": 7, "30d": 30, "3m": 90, "1y": 365 };
+    const days = daysMap[dateRange];
+    if (days) {
+      where.processedAt = { gte: new Date(Date.now() - days * 86_400_000) };
+    }
+  }
+
+  if (piiRange !== "any") {
+    if (piiRange === "none")   where.totalPiiFound = 0;
+    if (piiRange === "low")    where.totalPiiFound = { gte: 1,  lte: 10 };
+    if (piiRange === "medium") where.totalPiiFound = { gte: 11, lte: 50 };
+    if (piiRange === "high")   where.totalPiiFound = { gte: 51 };
+  }
+
+  // Build Prisma orderBy
+  const orderByMap: Record<string, object> = {
+    newest:      { processedAt: "desc" },
+    oldest:      { processedAt: "asc"  },
+    "pii-desc":  { totalPiiFound: "desc" },
+    "pii-asc":   { totalPiiFound: "asc"  },
+    "name-az":   { originalName: "asc"  },
+    "name-za":   { originalName: "desc" },
+  };
+  const orderBy = orderByMap[sort] ?? { processedAt: "desc" };
+
+  const skip = (page - 1) * USER_PAGE_SIZE;
+
+  const [records, total] = await Promise.all([
+    prisma.file.findMany({
+      where,
+      skip,
+      take: USER_PAGE_SIZE,
+      orderBy,
+      select: {
+        id:           true,
+        originalName: true,
+        fileType:     true,
+        status:       true,
+        totalPiiFound:true,
+        uploadedAt:   true,
+        processedAt:  true,
+      },
+    }),
+    prisma.file.count({ where }),
+  ]);
+
+  return NextResponse.json({
+    files:   records,
+    total,
+    hasMore: skip + USER_PAGE_SIZE < total,
+    page,
+  });
 }

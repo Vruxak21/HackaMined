@@ -47,6 +47,42 @@ type ChunkProgressData = {
     pipeline_config?: PipelineConfigData;
 };
 
+// ── Processing stage messages ───────────────────────────────────────────────────
+
+const SMALL_FILE_STAGES = [
+    "Extracting text content…",
+    "Running regex pattern detection…",
+    "Analyzing with NLP models…",
+    "Cross-referencing identity anchors…",
+    "Applying masking rules…",
+    "Finalizing sanitized output…",
+];
+
+function ProcessingStageText() {
+    const [idx, setIdx] = useState(0);
+    const [visible, setVisible] = useState(true);
+
+    useEffect(() => {
+        const tick = setInterval(() => {
+            setVisible(false);
+            setTimeout(() => {
+                setIdx((i) => (i + 1) % SMALL_FILE_STAGES.length);
+                setVisible(true);
+            }, 300);
+        }, 2800);
+        return () => clearInterval(tick);
+    }, []);
+
+    return (
+        <p
+            className="mt-0.5 text-xs text-muted-foreground transition-opacity duration-300"
+            style={{ opacity: visible ? 1 : 0 }}
+        >
+            {SMALL_FILE_STAGES[idx]}
+        </p>
+    );
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const SUPPORTED_FORMATS = ["SQL", "PDF", "DOCX", "CSV", "TXT", "JSON", "PNG", "JPG"];
@@ -339,21 +375,51 @@ function DropZoneContent({
     onReset,
 }: DropZoneContentProps) {
     if (uploadState === "uploading") {
+        const waitingForServer = progress >= 100;
         return (
             <div className="flex flex-col items-center gap-4">
                 <Loader2 size={36} className="animate-spin text-primary" />
-                <p className="text-sm font-medium text-foreground">
-                    Uploading{" "}
-                    <span className="font-semibold">
-                        {filename}
-                        {fileSizeMb > 0 && (
-                            <span className="ml-1 font-normal text-muted-foreground">
-                                ({fileSizeMb.toFixed(1)} MB)
+                {waitingForServer ? (
+                    <div className="text-center">
+                        <p className="text-sm font-semibold text-foreground">Preparing for analysis…</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                            File received — setting up processing pipeline
+                        </p>
+                    </div>
+                ) : (
+                    <div className="text-center">
+                        <p className="text-sm font-medium text-foreground">
+                            Uploading{" "}
+                            <span className="font-semibold">
+                                {filename}
+                                {fileSizeMb > 0 && (
+                                    <span className="ml-1 font-normal text-muted-foreground">
+                                        ({fileSizeMb.toFixed(1)} MB)
+                                    </span>
+                                )}
                             </span>
-                        )}
-                    </span>…
-                </p>
-                <ProgressBar value={progress} />
+                        </p>
+                        <p className="mt-0.5 text-xs tabular-nums text-muted-foreground">
+                            {progress}% uploaded
+                        </p>
+                    </div>
+                )}
+                {waitingForServer ? (
+                    <div className="flex w-64 flex-col gap-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                            <span className="text-muted-foreground">Preparing</span>
+                            <span className="text-[0.65rem] text-muted-foreground">Please wait…</span>
+                        </div>
+                        <div className="relative h-2 w-full overflow-hidden rounded-full bg-muted">
+                            <div
+                                className="absolute h-full w-1/3 rounded-full bg-primary"
+                                style={{ animation: "progress-indeterminate 1.4s ease-in-out infinite" }}
+                            />
+                        </div>
+                    </div>
+                ) : (
+                    <ProgressBar value={progress} />
+                )}
             </div>
         );
     }
@@ -420,7 +486,7 @@ function DropZoneContent({
                 <Loader2 size={36} className="animate-spin text-primary" />
                 <div className="text-center">
                     <p className="text-sm font-semibold text-foreground">Scanning for PII…</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">This may take a moment</p>
+                    <ProcessingStageText />
                     <PipelineModeBadge config={pipelineConfig} />
                 </div>
                 <ProgressBar value={progress} />
@@ -617,7 +683,7 @@ export default function AdminUploadPage() {
                 if (file.size > LARGE_FILE_THRESHOLD_MB * 1024 * 1024) {
                     chunkPollRef.current = setInterval(async () => {
                         try {
-                            const cRes = await fetch(`/api/files/${dbFile.id}/chunks`);
+                            const cRes = await fetch(`/api/files/${dbFile.id}/chunks`, { cache: "no-store" });
                             if (cRes.ok) {
                                 const cData = await cRes.json() as ChunkProgressData;
                                 if (cData.chunked && cData.total > 0) {
@@ -646,7 +712,7 @@ export default function AdminUploadPage() {
 
                 pollRef.current = setInterval(async () => {
                     try {
-                        const statusRes = await fetch(`/api/files/${dbFile.id}/status`);
+                        const statusRes = await fetch(`/api/files/${dbFile.id}/status`, { cache: "no-store" });
                         if (!statusRes.ok) return;
                         const data = await statusRes.json();
                         if (data.status === "DONE") {
@@ -656,7 +722,7 @@ export default function AdminUploadPage() {
                             // Final chunk fetch: file is now DONE so the /chunks endpoint reads
                             // persisted chunk_statuses from DB and flips all cards to "done".
                             try {
-                                const cRes = await fetch(`/api/files/${dbFile.id}/chunks`);
+                                const cRes = await fetch(`/api/files/${dbFile.id}/chunks`, { cache: "no-store" });
                                 if (cRes.ok) {
                                     const cData = await cRes.json() as ChunkProgressData;
                                     if (cData.chunked && cData.total > 0) setChunkProgress(cData);
@@ -675,7 +741,7 @@ export default function AdminUploadPage() {
                                 }
                                 setUploadState("done");
                                 redirectRef.current = setTimeout(() => {
-                                    router.push("/admin/files");
+                                    router.push(`/admin/files/${dbFile.id}`);
                                 }, 2000);
                             }, 700); // wait for bar transition before showing done
                         } else if (data.status === "FAILED") {

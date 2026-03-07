@@ -3,6 +3,8 @@ import { requireAuth } from "@/lib/auth-helper";
 import prisma from "@/lib/db";
 import { decryptJSON } from "@/lib/encryption";
 
+export const dynamic = "force-dynamic";
+
 function isRedirectError(err: unknown): boolean {
   return (
     typeof err === "object" &&
@@ -45,7 +47,7 @@ export async function GET(
     return NextResponse.json({ error: "File not found" }, { status: 404 });
   }
 
-  return NextResponse.json({
+  const resp = NextResponse.json({
     status: file.status,
     totalPiiFound: file.totalPiiFound,
     piiSummary: decryptJSON(file.piiSummary),
@@ -53,4 +55,6 @@ export async function GET(
     processedAt: file.processedAt,
     processingInfo: file.processingInfo ? JSON.parse(file.processingInfo) : null,
   });
+  resp.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  return resp;
 }

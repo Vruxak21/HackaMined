@@ -41,6 +41,18 @@ class AadhaarRecognizer(PatternRecognizer):
             score=0.95,
         ),
         Pattern(
+            name="aadhaar_dotted",
+            # e.g. 2345.6789.0123  — dot as separator
+            regex=r"\b[2-9]\d{3}\.\d{4}\.\d{4}\b",
+            score=0.90,
+        ),
+        Pattern(
+            name="aadhaar_slashed",
+            # e.g. 2345/6789/0123  — forward-slash as separator
+            regex=r"\b[2-9]\d{3}/\d{4}/\d{4}\b",
+            score=0.90,
+        ),
+        Pattern(
             name="aadhaar_plain",
             regex=r"\b[2-9]\d{11}\b",
             score=0.75,
@@ -107,6 +119,29 @@ class IndianPhoneRecognizer(PatternRecognizer):
             name="in_phone_bare",
             regex=r"\b[6-9]\d{9}\b",
             score=0.75,
+        ),
+        # ── Split formats ─────────────────────────────────────────────────────
+        # Phone numbers with an internal space or hyphen separator.
+        # Lower base score (needs context keywords to reach HIGH threshold).
+        # After preprocessor normalises commas → spaces, "98765,43210" also
+        # resolves to the 5+5 case below.
+        Pattern(
+            name="in_phone_split_5_5",
+            # e.g. 98765 43210  or  83858-38747
+            regex=r"\b[6-9]\d{4}[\s\-]\d{5}\b",
+            score=0.60,
+        ),
+        Pattern(
+            name="in_phone_split_4_6",
+            # e.g. 9876 543210  or  9876-543210
+            regex=r"\b[6-9]\d{3}[\s\-]\d{6}\b",
+            score=0.60,
+        ),
+        Pattern(
+            name="in_phone_split_3_7",
+            # e.g. 987 6543210  or  987-6543210
+            regex=r"\b[6-9]\d{2}[\s\-]\d{7}\b",
+            score=0.60,
         ),
     ]
     CONTEXT = ["mobile", "phone", "ph", "mob", "contact", "cell", "whatsapp"]
@@ -218,6 +253,12 @@ class AadhaarVIDRecognizer(PatternRecognizer):
         Pattern(
             name="aadhaar_vid_spaced",
             regex=r"\b\d{4}\s\d{4}\s\d{4}\s\d{4}\b",
+            score=0.80,
+        ),
+        Pattern(
+            name="aadhaar_vid_dashed",
+            # e.g. 1234-5678-9012-3456
+            regex=r"\b\d{4}-\d{4}-\d{4}-\d{4}\b",
             score=0.80,
         ),
         Pattern(

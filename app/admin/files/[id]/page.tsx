@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState, useEffect, useCallback } from "react";
+import { use, useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -22,6 +22,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
+import { PiiDiffViewer } from "@/components/diff/PiiDiffViewer";
+import { synthesizeEntitiesFromDiff, mapPythonEntityType } from "@/lib/diff/synthesizeEntities";
+import type { FileType } from "@/lib/diff/diffTypes";
 
 // ── Types ─────────────────────────────────────────────────────────────────────────────
 
@@ -81,22 +84,37 @@ const maskingModeStyle = {
 
 function piiTypeStyle(type: string): { bg: string; text: string } {
   const map: Record<string, { bg: string; text: string }> = {
+    // ── Identity ──────────────────────────────────────────────────────────
     PERSON:         { bg: "bg-red-100",     text: "text-red-700" },
     NAME:           { bg: "bg-red-100",     text: "text-red-700" },
+    ORGANIZATION:   { bg: "bg-red-50",      text: "text-red-500" },
+    NRP:            { bg: "bg-red-50",      text: "text-red-500" },
+    // ── Indian government IDs ─────────────────────────────────────────────
     AADHAAR:        { bg: "bg-orange-100",  text: "text-orange-700" },
+    AADHAAR_VID:    { bg: "bg-orange-50",   text: "text-orange-600" },
     PAN:            { bg: "bg-yellow-100",  text: "text-yellow-700" },
+    PASSPORT:       { bg: "bg-violet-100",  text: "text-violet-700" },
+    // ── Contact ───────────────────────────────────────────────────────────
     EMAIL_ADDRESS:  { bg: "bg-blue-100",    text: "text-blue-700" },
     IN_PHONE:       { bg: "bg-purple-100",  text: "text-purple-700" },
     PHONE_NUMBER:   { bg: "bg-purple-100",  text: "text-purple-700" },
+    // ── Location / date ───────────────────────────────────────────────────
     LOCATION:       { bg: "bg-pink-100",    text: "text-pink-700" },
     ADDRESS:        { bg: "bg-pink-100",    text: "text-pink-700" },
-    CREDIT_CARD:    { bg: "bg-rose-100",    text: "text-rose-700" },
-    IP_ADDRESS:     { bg: "bg-cyan-100",    text: "text-cyan-700" },
-    UPI:            { bg: "bg-emerald-100", text: "text-emerald-700" },
     DATE_TIME:      { bg: "bg-indigo-100",  text: "text-indigo-700" },
     DATE_OF_BIRTH:  { bg: "bg-indigo-100",  text: "text-indigo-700" },
+    // ── Financial ─────────────────────────────────────────────────────────
+    CREDIT_CARD:    { bg: "bg-rose-100",    text: "text-rose-700" },
+    CVV:            { bg: "bg-rose-50",     text: "text-rose-600" },
+    ACCOUNT_NUMBER: { bg: "bg-amber-100",   text: "text-amber-700" },
+    UPI:            { bg: "bg-emerald-100", text: "text-emerald-700" },
     IFSC:           { bg: "bg-teal-100",    text: "text-teal-700" },
-    PASSPORT:       { bg: "bg-violet-100",  text: "text-violet-700" },
+    // ── Network / device ──────────────────────────────────────────────────
+    IP_ADDRESS:     { bg: "bg-cyan-100",    text: "text-cyan-700" },
+    URL:            { bg: "bg-sky-100",     text: "text-sky-700" },
+    DEVICE_ID:      { bg: "bg-slate-100",   text: "text-slate-600" },
+    // ── Biometric ─────────────────────────────────────────────────────────
+    BIOMETRIC:      { bg: "bg-fuchsia-100", text: "text-fuchsia-700" },
   };
   return map[type] ?? { bg: "bg-gray-100", text: "text-gray-700" };
 }
@@ -437,6 +455,39 @@ export default function AdminFileDetailPage({
     URL.revokeObjectURL(url);
   }, [id]);
 
+  // ── These hooks must be BEFORE early returns (Rules of Hooks) ─────────────
+  const isBinary = (data?.originalContent ?? "").startsWith("[Binary");
+
+  const piiEntities = useMemo(() => {
+    if (!data || data.file.status !== "DONE" || isBinary) return [];
+    return synthesizeEntitiesFromDiff(
+      data.originalContent,
+      data.sanitizedContent,
+      data.piiSummary as Record<string, number>,
+      data.layerBreakdown as Record<string, number>
+    );
+  }, [data, isBinary]);
+
+  const diffStats = useMemo(() => {
+    if (!data) return { totalPiiFound: 0, byType: {} as Record<string, number>, detectionLayers: { regex: 0, spacy: 0, bert: 0 }, processingTime: 0 };
+    const byType: Record<string, number> = {};
+    for (const [pyType, count] of Object.entries(data.piiSummary as Record<string, number>)) {
+      const vType = mapPythonEntityType(pyType);
+      byType[vType] = (byType[vType] ?? 0) + count;
+    }
+    const lb = data.layerBreakdown as Record<string, number> | null;
+    return {
+      totalPiiFound: data.file.totalPiiFound,
+      byType,
+      detectionLayers: {
+        regex: lb?.regex ?? 0,
+        spacy: lb?.spacy ?? lb?.presidio_spacy ?? 0,
+        bert:  lb?.bert  ?? lb?.indic_bert     ?? 0,
+      },
+      processingTime: ((data.processingInfo as Record<string, number> | null)?.processing_time_seconds ?? 0) * 1000,
+    };
+  }, [data]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center p-20 text-gray-400">
@@ -456,6 +507,8 @@ export default function AdminFileDetailPage({
 
   const { file, piiSummary, originalContent, sanitizedContent, layerBreakdown, confidenceBreakdown, processingInfo } = data;
   const modeStyle = maskingModeStyle[file.maskingMode];
+
+  const normalizedFileType = (file.fileType?.toLowerCase() ?? "txt") as FileType;
   const highCount = confidenceBreakdown?.high_confidence ?? confidenceBreakdown?.high ?? 0;
   const mediumCount = confidenceBreakdown?.medium_confidence ?? confidenceBreakdown?.medium ?? 0;
 
@@ -692,29 +745,46 @@ export default function AdminFileDetailPage({
         </Card>
       )}
 
-      {/* ── 4. Side-by-Side Viewer ────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <CodePanel
-          variant="original"
-          title={
-            <span className="flex items-center gap-1.5">
-              <AlertTriangle size={13} />
-              Original — Admin Eyes Only
-            </span>
-          }
-          content={originalContent}
-        />
-        <CodePanel
-          variant="sanitized"
-          title={
-            <span className="flex items-center gap-1.5">
-              <Check size={13} />
-              Sanitized Output
-            </span>
-          }
-          content={sanitizedContent}
-        />
-      </div>
+      {/* ── 4. Diff Viewer ────────────────────────────────────────────────────── */}
+      {file.status === "DONE" && (
+        isBinary ? (
+          // Binary files — show plain download-only panels
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <CodePanel
+              variant="original"
+              title={
+                <span className="flex items-center gap-1.5">
+                  <AlertTriangle size={13} />
+                  Original — Admin Eyes Only
+                </span>
+              }
+              content={originalContent}
+            />
+            <CodePanel
+              variant="sanitized"
+              title={
+                <span className="flex items-center gap-1.5">
+                  <Check size={13} />
+                  Sanitized Output
+                </span>
+              }
+              content={sanitizedContent}
+            />
+          </div>
+        ) : (
+          <div className="h-[700px]">
+            <PiiDiffViewer
+              originalText={originalContent}
+              sanitizedText={sanitizedContent}
+              piiEntities={piiEntities}
+              fileName={file.originalName}
+              fileType={normalizedFileType}
+              stats={diffStats}
+              onDownloadSanitized={() => handleDownload("sanitized")}
+            />
+          </div>
+        )
+      )}
 
     </div>
   );

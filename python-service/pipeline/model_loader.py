@@ -94,6 +94,7 @@ bert_ner = None
 try:
     from transformers import pipeline as _hf_pipeline  # type: ignore[import]
 
+
     bert_ner = _hf_pipeline(
         "token-classification",
         model="dslim/bert-base-NER",
@@ -103,6 +104,11 @@ try:
 except Exception as exc:
     _load_errors["bert"] = str(exc)
     logger.warning("BERT NER unavailable, will fall back to spaCy only: %s", exc)
+
+
+# ── 5. OCR engine (EasyOCR → Tesseract → EXIF-only) ──────────────────────────
+
+from pipeline.ocr_engine import get_ocr_status as _get_ocr_status  # noqa: E402
 
 
 # ── Public helpers ─────────────────────────────────────────────────────────────
@@ -118,10 +124,16 @@ def is_ready() -> bool:
 
 def get_model_status() -> dict[str, Any]:
     """Return per-model load status and any error messages."""
+    ocr = _get_ocr_status()
     return {
         "presidio": analyzer is not None,
         "spacy_fast": nlp_fast is not None,
         "spacy_full": nlp_full is not None,
         "bert": bert_ner is not None,
+        "ocr": {
+            "easyocr":   ocr["easyocr"],
+            "tesseract": ocr["tesseract"],
+            "active":    ocr["active_engine"],
+        },
         "errors": list(_load_errors.values()),
     }

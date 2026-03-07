@@ -47,7 +47,6 @@ def _get_chunked_funcs() -> dict[str, Callable[..., dict[str, Any]]]:
     from chunking.json_chunker import process_json_chunked
     from chunking.pdf_chunker import process_pdf_chunked
     from chunking.docx_chunker import process_docx_chunked
-    from chunking.image_chunker import process_image_chunked
 
     _CHUNKED_FUNCS = {
         "sql":  process_sql_chunked,
@@ -58,9 +57,7 @@ def _get_chunked_funcs() -> dict[str, Callable[..., dict[str, Any]]]:
         "pdf":  process_pdf_chunked,
         "docx": process_docx_chunked,
         "doc":  process_docx_chunked,
-        "png":  process_image_chunked,
-        "jpg":  process_image_chunked,
-        "jpeg": process_image_chunked,
+        # images are handled via early intercept in process() before reaching here
     }
     return _CHUNKED_FUNCS
 
@@ -89,6 +86,10 @@ class ChunkOrchestrator:
         """
         ft   = file_type.lower().lstrip(".")
         mode = override_mode or "redact"
+
+        # ── Early intercept: images bypass chunking logic completely ──────────
+        if ft in {"png", "jpg", "jpeg", "webp", "bmp", "tiff"}:
+            return self._process_image(file_path, output_path, ft, mode)
 
         # ── Step 1: Validate ──────────────────────────────────────────────────
         if not validate_file_size(file_path):
@@ -274,6 +275,51 @@ class ChunkOrchestrator:
             },
         }
 
+    def _process_image(
+        self,
+        file_path: str,
+        output_path: str,
+        file_type: str,
+        mode: str,
+    ) -> dict[str, Any]:
+        """Route image files through the dedicated OCR+PII pipeline."""
+        from chunking.image_chunker import process_image
+
+        file_size_mb = get_file_size_mb(file_path)
+        config = get_pipeline_config(file_type, file_size_mb)
+
+        with parallel_processor.progress_lock:
+            parallel_processor.progress = {}
+
+        def _progress_cb(done: int, total: int) -> None:
+            with parallel_processor.progress_lock:
+                parallel_processor.progress = {i: "done" for i in range(done)}
+
+        result = process_image(
+            file_path=file_path,
+            output_path=output_path,
+            config=config,
+            progress_callback=_progress_cb,
+        )
+
+        return {
+            "success":              result.get("success", True),
+            "pii_summary":          result.get("pii_summary", {}),
+            "total_pii":            result.get("total_pii", 0),
+            "layer_breakdown":      result.get("layer_breakdown", {}),
+            "confidence_breakdown": result.get("confidence_breakdown", {}),
+            "strategies_applied":   result.get("strategies_applied", {}),
+            "processing_info": {
+                "file_size_mb":       round(file_size_mb, 2),
+                "total_chunks":       result.get("tile_count", 1),
+                "completed_chunks":   result.get("tile_count", 1),
+                "failed_chunks":      0,
+                "chunked_processing": False,
+                "image_processing":   True,
+                "ocr_engine":         result.get("engine_used", "none"),
+            },
+        }
+
     def _fallback_direct_process(
         self,
         file_path: str,
@@ -297,9 +343,6 @@ class ChunkOrchestrator:
         elif ft in {"docx", "doc"}:
             from parsers.docx_parser import process_docx
             raw = process_docx(file_path, output_path, mode)
-        elif ft in {"png", "jpg", "jpeg", "tiff", "bmp", "webp"}:
-            from parsers.image_parser import process_image
-            raw = process_image(file_path, output_path, mode)
         else:
             raise ValueError(f"Unsupported file type: {file_type}")
 

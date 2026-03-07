@@ -1,511 +1,435 @@
 """
-Image file chunker and merger for PNG / JPG using Pillow.
+Image PII processor — tiered OCR with graceful fallback.
 
-Splits an image into a regular grid of tiles, each saved as a lossless PNG
-for the OCR + redaction pass.  Every tile carries a 50-pixel overlap on each
-side so text that straddles a tile boundary is still fully readable by the
-OCR engine.  After processing, only the core (non-overlap) region of each
-tile is pasted back onto a blank canvas of the original dimensions.
+Automatically selects the best available OCR backend via pipeline.ocr_engine:
+  Tier 1 — EasyOCR   (deep-learning, no system binary required, pip install only)
+  Tier 2 — pytesseract (fast for clean text, requires tesseract binary on PATH)
+  Tier 3 — EXIF-only  (Pillow, always available, zero extra dependencies)
+
+Processing flow
+---------------
+  1. Open the image and convert to RGB.
+  2. For small images (< 400 px either dimension): single-pass OCR.
+     For larger images: split into a 4×4 tile grid with 50-px overlap.
+  3. Each tile: run_ocr() → detect_pii_single() (regex only, Rule D).
+  4. Draw filled black rectangles over every matched PII bounding box.
+  5. Composite processed tiles onto the original canvas dimension.
+  6. Save to output_path preserving the original file format.
+
+Exported public API
+-------------------
+  process_image(file_path, output_path, config, progress_callback) -> dict
+  process_image_chunked(...)  — compatibility alias used by orchestrator.py
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import uuid
-import tempfile
+import threading
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Any, Callable, Optional
 
-from PIL import Image  # type: ignore[import]
+from PIL import Image, ImageDraw
 
-from chunking.chunk_models import ChunkMetadata, ChunkResult
-from chunking.config import get_chunk_config
+from pipeline.ocr_engine import OCRWord, run_ocr, get_ocr_status
+from pipeline.detector import detect_pii_single
 
 logger = logging.getLogger(__name__)
 
-OVERLAP_PX = 50  # pixels added on each side of every tile for OCR context
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+GRID_ROWS             = 4
+GRID_COLS             = 4
+TILE_OVERLAP_PX       = 50
+MAX_WORKERS           = 8
+SMALL_IMAGE_THRESHOLD = 400   # px — process as single tile when smaller
 
 
-def _get_file_id(file_path: str) -> str:
-    stem = Path(file_path).stem.replace("-", "").replace("_", "")
-    if len(stem) >= 32 and all(c in "0123456789abcdefABCDEF" for c in stem[:32]):
-        return stem[:32]
-    return uuid.uuid4().hex
+# ── Data class ────────────────────────────────────────────────────────────────
+
+@dataclass
+class TileResult:
+    tile_index:     int
+    x_offset:       int                    # crop_left: tile's top-left x in full-image space
+    y_offset:       int                    # crop_top:  tile's top-left y in full-image space
+    tile_width:     int
+    tile_height:    int
+    ocr_text:       str                    = ""
+    ocr_words:      list[OCRWord]          = field(default_factory=list)
+    pii_detections: list[dict[str, Any]]  = field(default_factory=list)
+    engine_used:    str                    = "pillow_only"
+    exif_pii_count: int                    = 0
+    success:        bool                   = True
+    error:          str                    = ""
 
 
-class ImageChunker:
-    """Splits large images into grid tiles and reassembles them after processing."""
+# ── Tile splitting ────────────────────────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    # split
-    # ------------------------------------------------------------------
+def split_into_tiles(image: Image.Image) -> list[dict]:
+    """
+    Split *image* into a GRID_ROWS × GRID_COLS grid, each tile extended by
+    TILE_OVERLAP_PX on every side for OCR context at tile boundaries.
 
-    def split(self, file_path: str, file_type: str) -> List[ChunkMetadata]:
-        """
-        Slice *file_path* into a ``grid_rows × grid_cols`` grid, saving
-        each tile (plus a 50-px overlap border) as a lossless PNG.
+    Returns a list of dicts — one per tile — with keys:
+        index, row, col,
+        x_start (crop left),  y_start (crop top),
+        x_end   (crop right), y_end   (crop bottom),
+        core_left, core_top, core_right, core_bottom,
+        image   (PIL.Image crop)
+    """
+    w, h = image.size
+    tile_w = w // GRID_COLS
+    tile_h = h // GRID_ROWS
 
-        Parameters
-        ----------
-        file_path:
-            Source image path.
-        file_type:
-            Extension without dot (e.g. "png", "jpg", "jpeg") — used to
-            look up the grid config.
+    if tile_w == 0 or tile_h == 0:
+        # Image smaller than the grid — treat as a single tile
+        return [{
+            "index": 0, "row": 0, "col": 0,
+            "x_start": 0, "y_start": 0, "x_end": w, "y_end": h,
+            "core_left": 0, "core_top": 0, "core_right": w, "core_bottom": h,
+            "image": image.copy(),
+        }]
 
-        Returns
-        -------
-        list[ChunkMetadata]
-            One entry per tile, row-major order, temp PNGs already written.
-        """
-        config = get_chunk_config(file_type)
-        grid_rows: int = config["grid_rows"]
-        grid_cols: int = config["grid_cols"]
+    tiles: list[dict] = []
+    idx = 0
+    for row in range(GRID_ROWS):
+        for col in range(GRID_COLS):
+            core_left   = col * tile_w
+            core_top    = row * tile_h
+            core_right  = w if col == GRID_COLS - 1 else (col + 1) * tile_w
+            core_bottom = h if row == GRID_ROWS - 1 else (row + 1) * tile_h
 
-        img = Image.open(file_path)
-        original_width, original_height = img.size
-        original_mode = img.mode
+            x_start = max(0, core_left   - TILE_OVERLAP_PX)
+            y_start = max(0, core_top    - TILE_OVERLAP_PX)
+            x_end   = min(w, core_right  + TILE_OVERLAP_PX)
+            y_end   = min(h, core_bottom + TILE_OVERLAP_PX)
 
-        # Ensure consistent colour mode for all tiles
-        if original_mode not in ("RGB", "RGBA", "L"):
-            img = img.convert("RGB")
-            original_mode = "RGB"
+            tiles.append({
+                "index":       idx,
+                "row":         row,
+                "col":         col,
+                "x_start":     x_start,
+                "y_start":     y_start,
+                "x_end":       x_end,
+                "y_end":       y_end,
+                "core_left":   core_left,
+                "core_top":    core_top,
+                "core_right":  core_right,
+                "core_bottom": core_bottom,
+                "image":       image.crop((x_start, y_start, x_end, y_end)),
+            })
+            idx += 1
 
-        tile_width = original_width // grid_cols
-        tile_height = original_height // grid_rows
+    return tiles
 
-        # Guard against degenerate dimensions
-        if tile_width == 0 or tile_height == 0:
-            logger.warning(
-                "ImageChunker.split: image too small for %dx%d grid (%dx%d px) — "
-                "treating as single chunk  (file=%s)",
-                grid_rows,
-                grid_cols,
-                original_width,
-                original_height,
-                file_path,
+
+# ── Tile processing ───────────────────────────────────────────────────────────
+
+def process_tile(tile_dict: dict, config: dict) -> TileResult:
+    """Run OCR + PII detection on one tile.  Never raises — errors go into TileResult."""
+    idx      = tile_dict["index"]
+    x_start  = tile_dict["x_start"]
+    y_start  = tile_dict["y_start"]
+    tile_img = tile_dict["image"]
+
+    try:
+        ocr_text, ocr_words, engine_used = run_ocr(tile_img)
+
+        pii_detections: list[dict] = []
+        if ocr_text:
+            pii_detections = detect_pii_single(ocr_text, config)
+
+        # Count detections that came from the EXIF section of the text
+        exif_sep = "\n---EXIF---\n"
+        exif_pii = 0
+        if exif_sep in ocr_text:
+            _, exif_section = ocr_text.split(exif_sep, 1)
+            exif_pii = sum(
+                1 for d in pii_detections
+                if d.get("value") and d["value"] in exif_section
             )
-            grid_rows = grid_cols = 1
-            tile_width = original_width
-            tile_height = original_height
 
-        total_chunks = grid_rows * grid_cols
-        file_id = _get_file_id(file_path)
-        tmp_dir = Path(tempfile.gettempdir())
-        chunk_list: List[ChunkMetadata] = []
-        chunk_idx = 0
-
-        for row in range(grid_rows):
-            for col in range(grid_cols):
-
-                # ── Core tile boundaries ──────────────────────────────────
-                left = col * tile_width
-                upper = row * tile_height
-                right = original_width if col == grid_cols - 1 else left + tile_width
-                lower = original_height if row == grid_rows - 1 else upper + tile_height
-
-                # ── Expanded crop with overlap for OCR context ────────────
-                crop_left = max(0, left - OVERLAP_PX)
-                crop_upper = max(0, upper - OVERLAP_PX)
-                crop_right = min(original_width, right + OVERLAP_PX)
-                crop_lower = min(original_height, lower + OVERLAP_PX)
-
-                tile = img.crop((crop_left, crop_upper, crop_right, crop_lower))
-
-                temp_input_path = str(tmp_dir / f"chunk_{file_id}_{chunk_idx}.png")
-                temp_output_path = str(tmp_dir / f"chunk_{file_id}_{chunk_idx}_out.png")
-
-                tile.save(temp_input_path, format="PNG")
-
-                chunk_list.append(
-                    ChunkMetadata(
-                        chunk_index=chunk_idx,
-                        total_chunks=total_chunks,
-                        file_type=file_type,
-                        # Encode (row, col) as a single integer for ordering
-                        start_boundary=row * grid_cols + col,
-                        end_boundary=row * grid_cols + col + 1,
-                        overlap_before=0,
-                        overlap_after=0,
-                        temp_input_path=temp_input_path,
-                        temp_output_path=temp_output_path,
-                        extra_info={
-                            "grid_row": row,
-                            "grid_col": col,
-                            "original_left": left,
-                            "original_upper": upper,
-                            "original_right": right,
-                            "original_lower": lower,
-                            "crop_left": crop_left,
-                            "crop_upper": crop_upper,
-                            "crop_right": crop_right,
-                            "crop_lower": crop_lower,
-                            "overlap_px": OVERLAP_PX,
-                            "original_mode": original_mode,
-                        },
-                    )
-                )
-                chunk_idx += 1
-
-        img.close()
-
-        logger.info(
-            "ImageChunker.split: %dx%d grid → %d tiles  (file=%s)",
-            grid_rows,
-            grid_cols,
-            total_chunks,
-            file_path,
-        )
-        return chunk_list
-
-    # ------------------------------------------------------------------
-    # merge
-    # ------------------------------------------------------------------
-
-    def merge(
-        self,
-        chunk_results: List[ChunkResult],
-        chunk_output_paths: List[str],
-        chunk_metadata_list: List[ChunkMetadata],
-        output_path: str,
-        original_file_path: str,
-        file_type: str,
-    ) -> None:
-        """
-        Reassemble processed tile images onto a canvas matching the original
-        image dimensions.
-
-        For each tile only the *core* region (minus the overlap border) is
-        pasted, so the overlap pixels from adjacent tiles never overwrite
-        each other.
-
-        Parameters
-        ----------
-        chunk_results:
-            One ChunkResult per tile (used for ordering).
-        chunk_output_paths:
-            Matching processed output paths, same order as *chunk_results*.
-        chunk_metadata_list:
-            Metadata list (provides ``extra_info`` for each tile).
-        output_path:
-            Destination path for the merged image.
-        original_file_path:
-            Source image — used to read dimensions and mode.
-        file_type:
-            Extension without dot, determines output format.
-        """
-        original = Image.open(original_file_path)
-        width, height = original.size
-        mode = original.mode
-        if mode not in ("RGB", "RGBA", "L"):
-            mode = "RGB"
-        original.close()
-
-        output_img = Image.new(mode, (width, height))
-
-        # Sort by chunk_index so tiles are pasted in row-major order
-        ordered = sorted(
-            zip(chunk_results, chunk_output_paths, chunk_metadata_list),
-            key=lambda t: t[0].chunk_index,
+        return TileResult(
+            tile_index=idx,
+            x_offset=x_start,
+            y_offset=y_start,
+            tile_width=tile_img.width,
+            tile_height=tile_img.height,
+            ocr_text=ocr_text,
+            ocr_words=ocr_words,
+            pii_detections=pii_detections,
+            engine_used=engine_used,
+            exif_pii_count=exif_pii,
+            success=True,
         )
 
-        for result, out_path, meta in ordered:
-            info = meta.extra_info
-            try:
-                tile_img = Image.open(out_path)
-            except OSError as exc:
-                logger.warning(
-                    "ImageChunker.merge: cannot open tile %d (%s): %s",
-                    result.chunk_index,
-                    out_path,
-                    exc,
-                )
+    except Exception as exc:
+        logger.warning("process_tile %d failed: %s", idx, exc)
+        return TileResult(
+            tile_index=idx,
+            x_offset=x_start,
+            y_offset=y_start,
+            tile_width=getattr(tile_img, "width", 0),
+            tile_height=getattr(tile_img, "height", 0),
+            success=False,
+            error=str(exc),
+        )
+
+
+# ── Bounding-box lookup ───────────────────────────────────────────────────────
+
+def find_word_bbox_in_image(
+    word_text: str,
+    ocr_words: list[OCRWord],
+    tile_x_offset: int,
+    tile_y_offset: int,
+) -> list[tuple[int, int, int, int]]:
+    """
+    Return full-image (x0, y0, x1, y1) bounding boxes for *word_text*.
+
+    Searches *ocr_words* for blocks where the block text is a substring of
+    *word_text* or vice versa (case-insensitive).  Coords are converted from
+    tile space → full-image space by adding the tile crop offsets.
+    """
+    bboxes: list[tuple[int, int, int, int]] = []
+    needle = word_text.lower()
+    for w in ocr_words:
+        haystack = w.text.lower()
+        if not haystack:
+            continue
+        if haystack in needle or needle in haystack:
+            fx = w.x + tile_x_offset
+            fy = w.y + tile_y_offset
+            bboxes.append((fx, fy, fx + w.width, fy + w.height))
+    return bboxes
+
+
+# ── Image masking ─────────────────────────────────────────────────────────────
+
+def apply_masking_to_image(
+    original_image: Image.Image,
+    tile_results: list[TileResult],
+    mask_color: tuple[int, int, int] = (0, 0, 0),
+) -> Image.Image:
+    """
+    Draw filled rectangles over every detected PII region.
+
+    Returns a copy of *original_image* with PII bounding boxes blacked-out.
+    Returns *original_image* unchanged when no PII was detected.
+    """
+    has_pii = any(t.pii_detections for t in tile_results)
+    if not has_pii:
+        return original_image
+
+    masked = original_image.copy()
+    draw   = ImageDraw.Draw(masked)
+
+    for tile in tile_results:
+        if not tile.pii_detections or not tile.success:
+            continue
+        for det in tile.pii_detections:
+            pii_value = det.get("value", "")
+            if not pii_value:
                 continue
+            bboxes = find_word_bbox_in_image(
+                pii_value,
+                tile.ocr_words,
+                tile.x_offset,
+                tile.y_offset,
+            )
+            for x0, y0, x1, y1 in bboxes:
+                draw.rectangle([x0, y0, x1, y1], fill=mask_color)
 
-            # Ensure mode matches canvas
-            if tile_img.mode != mode:
-                tile_img = tile_img.convert(mode)
-
-            # ── Compute core region inside the (possibly overlapped) tile ──
-            core_left = info["original_left"] - info["crop_left"]
-            core_upper = info["original_upper"] - info["crop_upper"]
-            core_right = core_left + (info["original_right"] - info["original_left"])
-            core_lower = core_upper + (info["original_lower"] - info["original_upper"])
-
-            core_tile = tile_img.crop((core_left, core_upper, core_right, core_lower))
-            tile_img.close()
-
-            output_img.paste(core_tile, (info["original_left"], info["original_upper"]))
-
-        # ── Save ──────────────────────────────────────────────────────────
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        if file_type.lower() in ("jpg", "jpeg"):
-            # JPEG does not support alpha; convert if necessary
-            save_img = output_img.convert("RGB") if output_img.mode == "RGBA" else output_img
-            save_img.save(output_path, format="JPEG", quality=95)
-        else:
-            output_img.save(output_path, format="PNG")
-
-        output_img.close()
-
-        # ── Verify dimensions ─────────────────────────────────────────────
-        try:
-            check = Image.open(output_path)
-            out_w, out_h = check.size
-            check.close()
-            if (out_w, out_h) != (width, height):
-                logger.warning(
-                    "ImageChunker.merge: dimension mismatch — "
-                    "original=%dx%d, output=%dx%d  (file=%s)",
-                    width,
-                    height,
-                    out_w,
-                    out_h,
-                    output_path,
-                )
-            else:
-                logger.info(
-                    "Image merged: %dx%d preserved  (file=%s)",
-                    out_w,
-                    out_h,
-                    output_path,
-                )
-        except OSError:
-            pass
-
-    # ------------------------------------------------------------------
-    # cleanup
-    # ------------------------------------------------------------------
-
-    def cleanup(self, chunk_metadata_list: List[ChunkMetadata]) -> None:
-        """Delete all temporary tile files created by :meth:`split`."""
-        for meta in chunk_metadata_list:
-            for path in (meta.temp_input_path, meta.temp_output_path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+    return masked
 
 
-# ── Module-level chunked processing function ─────────────────────────────────
+# ── Main entry point ──────────────────────────────────────────────────────────
 
-DEFAULT_TILE_GRID = (4, 4)  # rows × cols
+def process_image(
+    file_path: str,
+    output_path: str,
+    config: dict | None = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> dict[str, Any]:
+    """
+    Detect and redact PII from a PNG / JPG / JPEG image.
 
+    Parameters
+    ----------
+    file_path:
+        Absolute path to the source image.
+    output_path:
+        Where the redacted image should be written.
+    config:
+        Pipeline config dict (use_regex, use_spacy, use_bert, workers …).
+        Images always force use_spacy=False and use_bert=False (Rule D —
+        NLP models are unreliable on noisy OCR output).
+    progress_callback:
+        Optional callable(done: int, total: int) called after each tile.
 
-def _noop_progress(tile_idx: int, status: str) -> None:  # noqa: ARG001
+    Returns
+    -------
+    dict with keys:
+        success, total_pii_found, pii_by_type, tiles_processed, tiles_failed,
+        ocr_engine_used, image_size, exif_pii_found.
+        Also includes orchestrator-compatible aliases:
+        pii_summary, total_pii, layer_breakdown, confidence_breakdown.
+
+    Only returns success=False when the file cannot be opened at all.
+    Tile failures are tolerated — partial results are better than a total failure.
+    """
+    # ── Defaults ─────────────────────────────────────────────────────────────
+    if config is None:
+        config = {}
+    config = {**config, "use_spacy": False, "use_bert": False, "use_regex": True}
+
+    # ── Step 1: Load image ────────────────────────────────────────────────────
+    try:
+        image = Image.open(file_path)
+        image.load()          # force decode so corrupt files fail here, not later
+        image = image.convert("RGB")
+    except Exception as exc:
+        logger.error("process_image: cannot open %s: %s", file_path, exc)
+        return {
+            "success": False,
+            "error": f"Cannot open image: {exc}",
+            "total_pii_found": 0,
+            # orchestrator-compatible aliases
+            "pii_summary": {}, "total_pii": 0,
+            "layer_breakdown": {}, "confidence_breakdown": {},
+        }
+
+    orig_w, orig_h = image.size
+    ocr_info = get_ocr_status()
+    logger.info(
+        "process_image: %dx%d  file=%s  ocr_engine=%s",
+        orig_w, orig_h, file_path, ocr_info["active_engine"],
+    )
+
+    # ── Step 2: Tile or single-pass ───────────────────────────────────────────
+    if orig_w < SMALL_IMAGE_THRESHOLD or orig_h < SMALL_IMAGE_THRESHOLD:
+        logger.debug("process_image: small image (%dx%d) → single-pass", orig_w, orig_h)
+        tiles = [{
+            "index": 0, "row": 0, "col": 0,
+            "x_start": 0, "y_start": 0, "x_end": orig_w, "y_end": orig_h,
+            "core_left": 0, "core_top": 0, "core_right": orig_w, "core_bottom": orig_h,
+            "image": image.copy(),
+        }]
+    else:
+        tiles = split_into_tiles(image)
+
+    total_tiles = len(tiles)
+    tile_results: list[TileResult] = []
+    lock = threading.Lock()
+    completed_count = 0
+
+    # ── Step 3: Parallel tile processing ─────────────────────────────────────
+    workers = min(MAX_WORKERS, total_tiles)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(process_tile, t, config): t for t in tiles}
+        for future in as_completed(futures):
+            result = future.result()   # process_tile never raises
+            with lock:
+                tile_results.append(result)
+                completed_count = len(tile_results)
+            if progress_callback:
+                progress_callback(completed_count, total_tiles)
+
+    tile_results.sort(key=lambda r: r.tile_index)
+
+    # ── Step 4: Masking ───────────────────────────────────────────────────────
+    masked_image = apply_masking_to_image(image, tile_results)
+    image.close()
+
+    # ── Step 5: Save output ───────────────────────────────────────────────────
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    ext = Path(output_path).suffix.lower()
+    if ext in (".jpg", ".jpeg"):
+        save_img = masked_image.convert("RGB") if masked_image.mode == "RGBA" else masked_image
+        save_img.save(output_path, format="JPEG", quality=95)
+    else:
+        masked_image.save(output_path, format="PNG", optimize=True)
+    masked_image.close()
+
+    # ── Step 6: Aggregate results ─────────────────────────────────────────────
+    tiles_failed = sum(1 for r in tile_results if not r.success)
+
+    # Deduplicate by (entity_type, value) — overlapping tiles may double-count
+    seen: set[tuple[str, str]] = set()
+    unique_dets: list[dict] = []
+    for tr in tile_results:
+        for det in tr.pii_detections:
+            key = (det.get("entity_type", ""), det.get("value", ""))
+            if key not in seen:
+                seen.add(key)
+                unique_dets.append(det)
+
+    pii_by_type: dict[str, int] = {}
+    for det in unique_dets:
+        et = det.get("entity_type", "UNKNOWN")
+        pii_by_type[et] = pii_by_type.get(et, 0) + 1
+
+    exif_pii_found = sum(r.exif_pii_count for r in tile_results)
+
+    engine_counts = Counter(r.engine_used for r in tile_results if r.success)
+    dominant_engine = engine_counts.most_common(1)[0][0] if engine_counts else "pillow_only"
+
+    # Only consider it a failure if ALL tiles failed AND no EXIF text was found
+    all_failed     = tiles_failed == total_tiles and total_tiles > 0
+    exif_extracted = any("\n---EXIF---\n" in (r.ocr_text or "") for r in tile_results)
+    job_success    = not (all_failed and not exif_extracted)
+
+    return {
+        "success":          job_success,
+        "total_pii_found":  len(unique_dets),
+        "pii_by_type":      pii_by_type,
+        "tiles_processed":  total_tiles,
+        "tiles_failed":     tiles_failed,
+        "ocr_engine_used":  dominant_engine,
+        "image_size":       [orig_w, orig_h],
+        "exif_pii_found":   exif_pii_found,
+        # ── Orchestrator-compatible aliases ───────────────────────────────────
+        "pii_summary":          pii_by_type,
+        "total_pii":            len(unique_dets),
+        "layer_breakdown":      {"regex": len(unique_dets), "spacy": 0, "bert": 0},
+        "confidence_breakdown": {"high": 0, "medium": 0},
+    }
+
+# ── Compatibility shim ────────────────────────────────────────────────────────
+# process_image_chunked is still referenced by orchestrator._get_chunked_funcs.
+# It adapts the old (input_path, output_path, mode, config, progress_cb)
+# signature into the new process_image API.
+
+def _noop_progress_cb(tile_idx: int, status: str) -> None:  # noqa: ARG001
     pass
 
 
 def process_image_chunked(
     input_path: str,
     output_path: str,
-    mode: str = "redact",
+    mode: str = "redact",               # noqa: ARG001 — images use visual redaction
     config: dict | None = None,
-    progress_cb=_noop_progress,
-) -> dict:
+    progress_cb: Callable[[int, str], None] | None = None,
+) -> dict[str, Any]:
     """
-    End-to-end image PII processing with OCR + regex only (Rule D).
+    Compatibility wrapper so orchestrator._get_chunked_funcs() continues to work.
 
-    1. Open image, split into 4×4 grid of tiles (50 px overlap).
-    2. OCR each tile in parallel via pytesseract.image_to_data().
-    3. Run regex-only detection on the OCR text per tile.
-    4. Draw black rectangles over detected PII bounding boxes.
-    5. Composite core regions back onto a canvas and save.
+    Translates the old progress_cb(tile_idx, status_str) convention into the
+    new progress_callback(done_count, total_count) convention used by
+    process_image, then delegates entirely to process_image.
     """
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    def _adapted_cb(done: int, total: int) -> None:
+        if progress_cb and total > 0:
+            for i in range(total):
+                progress_cb(i, "done" if i < done else "pending")
 
-    import pytesseract  # type: ignore[import]
-    from PIL import ImageDraw  # type: ignore[import]
+    return process_image(
+        file_path=input_path,
+        output_path=output_path,
+        config=config,
+        progress_callback=_adapted_cb if progress_cb else None,
+    )
 
-    from pipeline.detector import detect_pii_single
-
-    if config is None:
-        config = {"use_regex": True, "use_spacy": False, "use_bert": False,
-                  "spacy_model": None, "chunk_size": 16, "workers": 8}
-
-    # Safety override – images always use regex only
-    config = {**config, "use_spacy": False, "use_bert": False}
-    workers = config.get("workers", 8)
-
-    grid_rows, grid_cols = DEFAULT_TILE_GRID
-
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-
-    img = Image.open(input_path)
-    orig_w, orig_h = img.size
-    orig_mode = img.mode
-    if orig_mode not in ("RGB", "RGBA", "L"):
-        img = img.convert("RGB")
-        orig_mode = "RGB"
-
-    tile_w = orig_w // grid_cols
-    tile_h = orig_h // grid_rows
-
-    if tile_w == 0 or tile_h == 0:
-        grid_rows = grid_cols = 1
-        tile_w = orig_w
-        tile_h = orig_h
-
-    total_tiles = grid_rows * grid_cols
-    for i in range(total_tiles):
-        progress_cb(i, "pending")
-
-    # ── Build tile info ──────────────────────────────────────────────────
-    tiles: list[dict] = []
-    for row in range(grid_rows):
-        for col in range(grid_cols):
-            left = col * tile_w
-            upper = row * tile_h
-            right = orig_w if col == grid_cols - 1 else left + tile_w
-            lower = orig_h if row == grid_rows - 1 else upper + tile_h
-
-            crop_left = max(0, left - OVERLAP_PX)
-            crop_upper = max(0, upper - OVERLAP_PX)
-            crop_right = min(orig_w, right + OVERLAP_PX)
-            crop_lower = min(orig_h, lower + OVERLAP_PX)
-
-            tile_img = img.crop((crop_left, crop_upper, crop_right, crop_lower))
-            tiles.append({
-                "idx": row * grid_cols + col,
-                "tile_img": tile_img,
-                "core_left": left,
-                "core_upper": upper,
-                "core_right": right,
-                "core_lower": lower,
-                "crop_left": crop_left,
-                "crop_upper": crop_upper,
-            })
-
-    img.close()
-
-    # ── Parallel OCR + detection + redaction per tile ────────────────────
-    lock = threading.Lock()
-    all_detections: list[dict] = []
-    processed_tiles: dict[int, Image.Image] = {}
-
-    def _process_tile(tile_info: dict):
-        idx = tile_info["idx"]
-        tile_img = tile_info["tile_img"]
-        progress_cb(idx, "processing")
-
-        try:
-            # OCR with bounding-box data
-            ocr_data = pytesseract.image_to_data(
-                tile_img, output_type=pytesseract.Output.DICT
-            )
-
-            # Build full text for detection
-            words = ocr_data.get("text", [])
-            full_text = " ".join(w for w in words if w.strip())
-
-            dets = detect_pii_single(full_text, config) if full_text else []
-
-            # Draw black rectangles over detected PII
-            if dets:
-                draw = ImageDraw.Draw(tile_img)
-                detected_values = {d["value"] for d in dets if d.get("value")}
-
-                n_words = len(words)
-                lefts = ocr_data.get("left", [])
-                tops = ocr_data.get("top", [])
-                widths = ocr_data.get("width", [])
-                heights = ocr_data.get("height", [])
-                confs = ocr_data.get("conf", [])
-
-                for i in range(n_words):
-                    word = words[i].strip()
-                    if not word:
-                        continue
-                    # Check if this word appears in any detected PII value
-                    for val in detected_values:
-                        if word in val or val in word:
-                            try:
-                                conf = int(confs[i])
-                            except (ValueError, TypeError):
-                                conf = 0
-                            if conf > 0:
-                                x = lefts[i]
-                                y = tops[i]
-                                w = widths[i]
-                                h = heights[i]
-                                draw.rectangle(
-                                    [x, y, x + w, y + h],
-                                    fill="black",
-                                )
-                            break
-
-            progress_cb(idx, "done")
-            return idx, tile_img, dets
-        except Exception:
-            progress_cb(idx, "failed")
-            raise
-
-    with ThreadPoolExecutor(max_workers=min(workers, total_tiles)) as executor:
-        futures = {
-            executor.submit(_process_tile, t): t["idx"] for t in tiles
-        }
-        for future in as_completed(futures):
-            idx, redacted_tile, dets = future.result()
-            with lock:
-                processed_tiles[idx] = redacted_tile
-                all_detections.extend(dets)
-
-    # ── Composite core regions onto output canvas ────────────────────────
-    output_img = Image.new(orig_mode, (orig_w, orig_h))
-
-    for tile_info in tiles:
-        idx = tile_info["idx"]
-        tile_img = processed_tiles[idx]
-
-        core_offset_x = tile_info["core_left"] - tile_info["crop_left"]
-        core_offset_y = tile_info["core_upper"] - tile_info["crop_upper"]
-        core_w = tile_info["core_right"] - tile_info["core_left"]
-        core_h = tile_info["core_lower"] - tile_info["core_upper"]
-
-        core = tile_img.crop((
-            core_offset_x, core_offset_y,
-            core_offset_x + core_w, core_offset_y + core_h,
-        ))
-        output_img.paste(core, (tile_info["core_left"], tile_info["core_upper"]))
-        tile_img.close()
-
-    # ── Save ─────────────────────────────────────────────────────────────
-    ext = Path(output_path).suffix.lower()
-    if ext in (".jpg", ".jpeg"):
-        save_img = output_img.convert("RGB") if output_img.mode == "RGBA" else output_img
-        save_img.save(output_path, format="JPEG", quality=95)
-    else:
-        output_img.save(output_path, format="PNG")
-    output_img.close()
-
-    return _build_image_summary(all_detections, total_tiles)
-
-
-def _build_image_summary(detections: list[dict], tile_count: int) -> dict:
-    pii_summary: dict[str, int] = {}
-    layer_breakdown: dict[str, int] = {"regex": 0, "spacy": 0, "bert": 0}
-    high = medium = 0
-
-    for det in detections:
-        et = det["entity_type"]
-        pii_summary[et] = pii_summary.get(et, 0) + 1
-        layer = det.get("layer", "regex")
-        if layer in layer_breakdown:
-            layer_breakdown[layer] += 1
-        else:
-            layer_breakdown[layer] = 1
-        score = det.get("score", 0)
-        if score >= 0.85:
-            high += 1
-        elif score >= 0.60:
-            medium += 1
-
-    return {
-        "pii_summary":          pii_summary,
-        "total_pii":            len(detections),
-        "layer_breakdown":      layer_breakdown,
-        "confidence_breakdown": {"high": high, "medium": medium},
-        "tile_count":           tile_count,
-    }

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth-helper";
 import prisma from "@/lib/db";
 
+export const dynamic = "force-dynamic";
+
 function isRedirectError(err: unknown): boolean {
   return (
     typeof err === "object" &&
@@ -83,6 +85,7 @@ export async function GET(
   try {
     const res = await fetch(`${baseUrl}/process-status/${encodeURIComponent(id)}`, {
       signal: AbortSignal.timeout(5_000),
+      cache: "no-store",
     });
 
     if (!res.ok) {
@@ -111,7 +114,9 @@ export async function GET(
       };
     };
 
-    return NextResponse.json({ ...data, chunked: true });
+    const resp = NextResponse.json({ ...data, chunked: true });
+    resp.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    return resp;
   } catch {
     return NextResponse.json({
       job_id: id,

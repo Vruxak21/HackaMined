@@ -99,14 +99,29 @@ class DetectTextRequest(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
+    status = get_model_status()
+    ocr = status.get("ocr", {})
+    active_engine = ocr.get("active", "none")
+    if ocr.get("easyocr"):
+        ocr_note = "EasyOCR (deep-learning, no system dependency)"
+    elif ocr.get("tesseract"):
+        ocr_note = "Tesseract (system binary)"
+    else:
+        ocr_note = "EXIF metadata only — no OCR engine available"
+
     return {
         "status": "ok" if is_ready() else "loading",
         "service": "PII Detection",
         "model_loaded": _model_loaded,
-        "models": get_model_status(),
+        "models": status,
         "indic_bert_loaded": pii_analyzer.indic_ner is not None,
         "transformer_ner_loaded": pii_analyzer.indic_ner is not None,
         "transformer_model": "dslim/bert-base-NER" if pii_analyzer.indic_ner is not None else None,
+        "image_processing": {
+            "available":   active_engine != "none",
+            "ocr_engine":  active_engine,
+            "note":        ocr_note,
+        },
     }
 
 

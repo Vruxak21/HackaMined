@@ -135,6 +135,37 @@ class TextPreprocessor:
         # 1. Unicode normalization (NFC: composed form, handles accented chars)
         text = unicodedata.normalize("NFC", text)
 
+        # 1a. Remove zero-width and invisible control characters so they
+        #     cannot split number tokens that appear continuous to the eye.
+        #     Covers: zero-width space (U+200B), ZWJ (U+200D), ZWNJ (U+200C),
+        #     BOM (U+FEFF), and Unicode line/paragraph separators (U+2028/29).
+        text = re.sub(r"[\u200b-\u200d\u2028\u2029\ufeff]", "", text)
+
+        # 1b. Normalize Unicode whitespace variants → ASCII space so that
+        #     the collapse step below treats them uniformly.
+        #     Covers: NBSP (U+00A0), ogham space (U+1680), Unicode general
+        #     punctuation spaces U+2000-U+200A, narrow NBSP (U+202F),
+        #     medium mathematical space (U+205F), ideographic space (U+3000).
+        text = re.sub(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]", " ", text)
+
+        # 1c. Normalize typographic dashes → ASCII hyphen (-).
+        #     Covers: non-breaking hyphen (U+2011), figure dash (U+2012),
+        #     en-dash (U+2013), em-dash (U+2014), horizontal bar (U+2015),
+        #     and minus sign (U+2212).
+        text = re.sub(r"[\u2011-\u2015\u2212]", "-", text)
+
+        # 1d. Commas used as digit-group separators → single space so that
+        #     structured identifiers written as "1234,5678,9012" (Aadhaar)
+        #     or "98765,43210" (phone) collapse to their spaced equivalents
+        #     that the existing regex patterns already recognise.
+        #     Only replaces commas that are immediately flanked by digits,
+        #     leaving sentence commas and CSV structure untouched.
+        text = re.sub(r"(?<=\d),(?=\d)", " ", text)
+
+        # 1e. Underscores between consecutive digits → hyphen.
+        #     Handles formats like "1234_5678_9012".
+        text = re.sub(r"(?<=\d)_(?=\d)", "-", text)
+
         # 2. Collapse horizontal whitespace to a single space; preserve newlines
         text = re.sub(r"[ \t\r\f\v]+", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
