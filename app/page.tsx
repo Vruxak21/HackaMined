@@ -119,30 +119,40 @@ function SignInForm() {
 
   async function onSubmit(data: SignInValues) {
     setLoading(true);
-    const { error } = await signIn.email({
-      email: data.email,
-      password: data.password,
-      callbackURL: "/auth/callback",
-    });
-    setLoading(false);
+    try {
+      const { error } = await signIn.email({
+        email: data.email,
+        password: data.password,
+        callbackURL: "/auth/callback",
+      });
 
-    if (error) {
-      toast.error(error.message ?? "Sign in failed. Please try again.");
-    } else {
-      toast.success("Welcome back! Redirecting…");
-      router.push("/auth/callback");
+      if (error) {
+        toast.error(error.message ?? "Sign in failed. Please try again.");
+      } else {
+        toast.success("Welcome back! Redirecting…");
+        router.push("/auth/callback");
+      }
+    } catch {
+      toast.error("Unable to reach the authentication service. Check the app URL and try again.");
+    } finally {
+      setLoading(false);
     }
   }
 
   async function handleGoogle() {
     setGoogleLoading(true);
-    const { error } = await signIn.social({
-      provider: "google",
-      callbackURL: "/auth/callback",
-    });
-    if (error) {
+    try {
+      const { error } = await signIn.social({
+        provider: "google",
+        callbackURL: "/auth/callback",
+      });
+      if (error) {
+        toast.error(error.message ?? "Google sign in failed.");
+      }
+    } catch {
+      toast.error("Unable to start Google sign in. Check the app URL and try again.");
+    } finally {
       setGoogleLoading(false);
-      toast.error(error.message ?? "Google sign in failed.");
     }
   }
 
@@ -238,31 +248,41 @@ function SignUpForm() {
 
   async function onSubmit(data: SignUpValues) {
     setLoading(true);
-    const { error } = await signUp.email({
-      name: data.name,
-      email: data.email,
-      password: data.password,
-      callbackURL: "/auth/callback",
-    });
-    setLoading(false);
+    try {
+      const { error } = await signUp.email({
+        name: data.name,
+        email: data.email,
+        password: data.password,
+        callbackURL: "/auth/callback",
+      });
 
-    if (error) {
-      toast.error(error.message ?? "Sign up failed. Please try again.");
-    } else {
-      toast.success("Account created! Redirecting…");
-      router.push("/auth/callback");
+      if (error) {
+        toast.error(error.message ?? "Sign up failed. Please try again.");
+      } else {
+        toast.success("Account created! Redirecting…");
+        router.push("/auth/callback");
+      }
+    } catch {
+      toast.error("Unable to reach the authentication service. Check the app URL and try again.");
+    } finally {
+      setLoading(false);
     }
   }
 
   async function handleGoogle() {
     setGoogleLoading(true);
-    const { error } = await signIn.social({
-      provider: "google",
-      callbackURL: "/auth/callback",
-    });
-    if (error) {
+    try {
+      const { error } = await signIn.social({
+        provider: "google",
+        callbackURL: "/auth/callback",
+      });
+      if (error) {
+        toast.error(error.message ?? "Google sign up failed.");
+      }
+    } catch {
+      toast.error("Unable to start Google sign up. Check the app URL and try again.");
+    } finally {
       setGoogleLoading(false);
-      toast.error(error.message ?? "Google sign up failed.");
     }
   }
 

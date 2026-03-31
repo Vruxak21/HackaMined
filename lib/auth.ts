@@ -3,10 +3,36 @@ import { prismaAdapter } from "better-auth/adapters/prisma";
 import prisma from "./db";
 import { logAction } from "./auth-helper";
 
+function buildTrustedOrigins(): string[] {
+  const envOrigins = [
+    process.env.NEXT_PUBLIC_APP_URL,
+    process.env.BETTER_AUTH_URL,
+    process.env.BETTER_AUTH_TRUSTED_ORIGINS,
+  ]
+    .filter(Boolean)
+    .flatMap((value) => String(value).split(","))
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  const localOrigins = [
+    "http://localhost:3000",
+    "https://localhost:3000",
+    "http://localhost:3001",
+    "https://localhost:3001",
+    "http://127.0.0.1:3000",
+    "https://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "https://127.0.0.1:3001",
+  ];
+
+  return Array.from(new Set([...envOrigins, ...localOrigins]));
+}
+
 export const auth = betterAuth({
   database: prismaAdapter(prisma, {
     provider: "postgresql",
   }),
+  trustedOrigins: buildTrustedOrigins(),
   emailAndPassword: {
     enabled: true,
   },
